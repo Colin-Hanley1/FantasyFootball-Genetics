@@ -7,7 +7,7 @@ import csv
 # --- Configuration Constants ---
 GAMES_IN_SEASON = 17
 PICKS_PER_ROUND = 12
-DEFAULT_CSV_FILENAME = "player_pool.csv" # Make sure this CSV exists or is updated
+DEFAULT_CSV_FILENAME = "player_pool.csv"
 
 # --- Roster Configuration ---
 FLEX_ELIGIBILITY = {
@@ -26,20 +26,13 @@ ROSTER_STRUCTURE = {
 }
 
 # --- Global Variables ---
-# Initial State (Loaded once)
 INITIAL_PLAYER_POOL_DATA = []
-MASTER_PLAYER_ID_TO_DATA = {} # For all players ever loaded
-
-# Draft State (Updated during live draft)
+MASTER_PLAYER_ID_TO_DATA = {}
 GLOBALLY_DRAFTED_PLAYER_IDS = set()
-USER_DRAFTED_PLAYERS_DATA = [] # List of player data tuples for your team
-
-# GA Run State (Rebuilt before each GA run)
+USER_DRAFTED_PLAYERS_DATA = []
 CURRENT_AVAILABLE_PLAYER_POOL_FOR_GA = []
-CURRENT_PLAYERS_BY_POSITION_FOR_GA = {} # Based on CURRENT_AVAILABLE_PLAYER_POOL_FOR_GA
-USER_PLAYER_SLOT_ASSIGNMENTS = {} # {player_id: assigned_slot_index} for your drafted players
-
-# Static Roster Definition (Set once by initial_setup)
+CURRENT_PLAYERS_BY_POSITION_FOR_GA = {}
+USER_PLAYER_SLOT_ASSIGNMENTS = {}
 POSITION_ORDER = []
 TOTAL_ROSTER_SPOTS = 0
 
@@ -132,12 +125,11 @@ def prepare_for_ga_run():
 
     USER_PLAYER_SLOT_ASSIGNMENTS = {}
     available_slots_indices = list(range(TOTAL_ROSTER_SPOTS))
-    sorted_user_players = sorted(USER_DRAFTED_PLAYERS_DATA, key=lambda x: x[4]) # Sort by round
+    sorted_user_players = sorted(USER_DRAFTED_PLAYERS_DATA, key=lambda x: x[4])
 
     for player_data in sorted_user_players:
         player_id, _, actual_player_pos, _, _ = player_data
         assigned_this_player = False
-        # Try to assign to specific position slot first (iterate over a copy for safe removal)
         for slot_idx in list(available_slots_indices):
             slot_type = POSITION_ORDER[slot_idx]
             if slot_type == actual_player_pos:
@@ -146,7 +138,6 @@ def prepare_for_ga_run():
                 assigned_this_player = True
                 break
         if assigned_this_player: continue
-        # Then try to assign to flex slot (iterate over a copy)
         for slot_idx in list(available_slots_indices):
             slot_type = POSITION_ORDER[slot_idx]
             if slot_type in FLEX_ELIGIBILITY and actual_player_pos in FLEX_ELIGIBILITY[slot_type]:
@@ -156,7 +147,7 @@ def prepare_for_ga_run():
                 break
         if not assigned_this_player:
             print(f"Warning: Could not auto-assign {player_data[1]} ({actual_player_pos}) to a roster slot.")
-    
+
     print(f"User players assigned to slots: {USER_PLAYER_SLOT_ASSIGNMENTS}")
     num_ga_slots = TOTAL_ROSTER_SPOTS - len(USER_PLAYER_SLOT_ASSIGNMENTS)
     print(f"GA will attempt to fill {num_ga_slots} open slots.")
@@ -186,6 +177,29 @@ def get_eligible_players_for_slot_type_for_ga(slot_type_value):
     elif slot_type_value in CURRENT_PLAYERS_BY_POSITION_FOR_GA:
         eligible_players = CURRENT_PLAYERS_BY_POSITION_FOR_GA[slot_type_value]
     return eligible_players
+
+def find_player_by_name(name_query):
+    name_query_lower = name_query.lower()
+    exact_matches = []
+    partial_matches = []
+
+    for player_data_tuple in INITIAL_PLAYER_POOL_DATA:
+        player_name_lower = player_data_tuple[1].lower()
+        if name_query_lower == player_name_lower:
+            exact_matches.append(player_data_tuple)
+    
+    if exact_matches:
+        return exact_matches
+    
+    for player_data_tuple in INITIAL_PLAYER_POOL_DATA:
+        player_name_lower = player_data_tuple[1].lower()
+        normalized_player_name = player_name_lower.replace("_", " ")
+        normalized_query = name_query_lower.replace("_", " ")
+        if normalized_query in normalized_player_name:
+            partial_matches.append(player_data_tuple)
+            
+    return partial_matches
+
 
 # --- GA Core Functions (Modified for Live Draft) ---
 
@@ -268,8 +282,8 @@ def calculate_fitness(individual_ids):
         if not is_valid: return -PENALTY_VIOLATION * 10, 0, set(), lineup_players_data
 
     actual_player_count = sum(1 for pid in individual_ids if pid is not None and pid > 0)
-    player_id_set = set(p_data[0] for p_data in lineup_players_data) # lineup_players_data only contains valid players
-    if len(player_id_set) != actual_player_count: # Check if unique IDs match count of actual players
+    player_id_set = set(p_data[0] for p_data in lineup_players_data)
+    if len(player_id_set) != actual_player_count:
         return -PENALTY_VIOLATION * 5, 0, set(), lineup_players_data
 
     player_rounds = [p_data[4] for p_data in lineup_players_data]
@@ -413,8 +427,8 @@ def mutate(individual_ids):
         options = [p for p in eligible_pool if p[0] not in other_ids and \
                    (p[4] not in other_rounds or (original_round != -1 and p[4] == original_round))]
         if not options: options = [p for p in eligible_pool if p[0] not in other_ids and p[0] != original_player_id_at_idx]
-        if not options: options = [p for p in eligible_pool if p[0] != original_player_id_at_idx] # Ensure it's not the same player ID
-        if not options and eligible_pool: options = eligible_pool # Last resort: pick any if all above fail
+        if not options: options = [p for p in eligible_pool if p[0] != original_player_id_at_idx]
+        if not options and eligible_pool: options = eligible_pool
 
         if options: mutated_ids[mutation_idx] = random.choice(options)[0]
     return repair_lineup(mutated_ids)
@@ -440,7 +454,7 @@ def genetic_algorithm_adp_lineup():
         fitness,_,_,_ = calculate_fitness(current_team_ids)
         return current_team_ids, fitness
         
-    population = create_initial_population() # Call the defined function
+    population = create_initial_population()
     if not population or not all(ind and len(ind) == TOTAL_ROSTER_SPOTS for ind in population):
         print("Critical: Initial GA population is empty or malformed.")
         current_team_ids = [None] * TOTAL_ROSTER_SPOTS
@@ -462,9 +476,8 @@ def genetic_algorithm_adp_lineup():
         if current_best_fitness > best_fitness_overall:
             best_fitness_overall = current_best_fitness
             best_lineup_overall_ids = list(population[current_best_idx])
-            best_ppg = fitness_results[current_best_idx][1] # res[1] is total_ppg
+            best_ppg = fitness_results[current_best_idx][1]
 
-            # Corrected f-string logic
             ppg_display_string = f"{best_ppg:.2f}" if best_fitness_overall > -PENALTY_VIOLATION else "N/A"
             print(f"Gen {generation+1}: New Global Best! Fit={best_fitness_overall:.2f}, PPG={ppg_display_string}")
 
@@ -491,11 +504,10 @@ def genetic_algorithm_adp_lineup():
         population = next_population[:POPULATION_SIZE]
 
         if (generation + 1) % 10 == 0 or generation == N_GENERATIONS - 1:
-            gen_fit_p, gen_ppg_p, gen_rds_p, _ = fitness_results[current_best_idx] # Use current_best_idx from this gen
+            gen_fit_p, gen_ppg_p, gen_rds_p, _ = fitness_results[current_best_idx]
 
-            # Corrected f-string logic
             ppg_display_periodic = f"{gen_ppg_p:.2f}" if gen_fit_p > -PENALTY_VIOLATION else 'N/A'
-            rounds_display_periodic = str(len(gen_rds_p)) if gen_fit_p > -PENALTY_VIOLATION else 'N/A' # Ensure string for N/A
+            rounds_display_periodic = str(len(gen_rds_p)) if gen_fit_p > -PENALTY_VIOLATION else 'N/A'
             print(f"Gen {generation+1}: Pop Best Fit={gen_fit_p:.2f}, PPG={ppg_display_periodic}, Rds={rounds_display_periodic}")
 
     print("\n--- Genetic Algorithm Finished ---")
@@ -542,43 +554,65 @@ if __name__ == "__main__":
 
     while True:
         print("\n--- Live Draft Options ---")
-        print("  'd <player_id>'   : Record player drafted globally")
-        print("  'my <player_id>'  : Record YOUR drafted player")
-        print("  'run'             : Get new draft suggestions (runs GA)")
-        print("  'team'            : View your current team slots")
-        print("  'drafted'         : View all globally drafted players")
-        print("  'available [pos]' : View top available players (optional: by position filter, e.g. 'available WR')")
-        print("  'q'               : Quit")
+        print("  'd <player_name_or_id>'   : Record player drafted globally")
+        print("  'my <player_name_or_id>'  : Record YOUR drafted player")
+        print("  'run'                     : Get new draft suggestions (runs GA)")
+        print("  'team'                    : View your current team slots")
+        print("  'drafted'                 : View all globally drafted players")
+        print("  'available [pos]'         : View top available players (optional: by position filter, e.g. 'available WR')")
+        print("  'q'                       : Quit")
         
         action_input = input("Enter action: ").strip().lower().split()
         command = action_input[0] if action_input else ""
+        args = action_input[1:]
 
-        if command == 'd' and len(action_input) > 1:
-            try:
-                pid = int(action_input[1])
-                p_data = get_player_data(pid)
-                if p_data:
-                    GLOBALLY_DRAFTED_PLAYER_IDS.add(pid)
-                    USER_DRAFTED_PLAYERS_DATA = [p for p in USER_DRAFTED_PLAYERS_DATA if p[0] != pid]
-                    if pid in USER_PLAYER_SLOT_ASSIGNMENTS:
-                        del USER_PLAYER_SLOT_ASSIGNMENTS[pid]
-                    print(f"Player {p_data[1]} (ID: {pid}) marked globally drafted.")
-                else: print(f"Player ID {pid} not found.")
-            except ValueError: print("Invalid Player ID.")
+        if command in ['d', 'my'] and args:
+            query = " ".join(args)
+            target_pid = None
+            target_p_data = None
 
-        elif command == 'my' and len(action_input) > 1:
             try:
-                pid = int(action_input[1])
-                p_data = get_player_data(pid)
-                if p_data:
-                    if pid not in GLOBALLY_DRAFTED_PLAYER_IDS:
-                        if not any(ud_p[0] == pid for ud_p in USER_DRAFTED_PLAYERS_DATA):
-                             USER_DRAFTED_PLAYERS_DATA.append(p_data)
-                        GLOBALLY_DRAFTED_PLAYER_IDS.add(pid)
-                        print(f"You drafted: {p_data[1]} ({p_data[2]})")
-                    else: print(f"Player {p_data[1]} (ID: {pid}) already drafted.")
-                else: print(f"Player ID {pid} not found.")
-            except ValueError: print("Invalid Player ID.")
+                pid_candidate = int(query)
+                if get_player_data(pid_candidate):
+                    target_pid = pid_candidate
+                    target_p_data = get_player_data(target_pid)
+            except ValueError:
+                matched_players = find_player_by_name(query)
+                if not matched_players:
+                    print(f"Player '{query}' not found by name or ID.")
+                    continue
+                elif len(matched_players) == 1:
+                    target_p_data = matched_players[0]
+                    target_pid = target_p_data[0]
+                else:
+                    print(f"Ambiguous name '{query}'. Found multiple matches:")
+                    for p_id_match, name_match, pos_match, _, _ in matched_players:
+                        print(f"  ID: {p_id_match}, Name: {name_match}, Position: {pos_match}")
+                    print(f"Please use specific ID for '{command} <player_id>'.")
+                    continue
+            
+            if target_pid is None or target_p_data is None:
+                if not get_player_data(int(query)) : print(f"Player ID '{query}' not found.") # Should have been caught by try-except if it was an ID
+                else: print(f"Error resolving player '{query}'.") # Generic fallback
+                continue
+
+            if command == 'd':
+                GLOBALLY_DRAFTED_PLAYER_IDS.add(target_pid)
+                USER_DRAFTED_PLAYERS_DATA = [p for p in USER_DRAFTED_PLAYERS_DATA if p[0] != target_pid]
+                if target_pid in USER_PLAYER_SLOT_ASSIGNMENTS:
+                    del USER_PLAYER_SLOT_ASSIGNMENTS[target_pid]
+                print(f"Player {target_p_data[1]} (ID: {target_pid}) marked globally drafted.")
+            
+            elif command == 'my':
+                if target_pid not in GLOBALLY_DRAFTED_PLAYER_IDS:
+                    if not any(ud_p[0] == target_pid for ud_p in USER_DRAFTED_PLAYERS_DATA):
+                         USER_DRAFTED_PLAYERS_DATA.append(target_p_data)
+                    GLOBALLY_DRAFTED_PLAYER_IDS.add(target_pid)
+                    print(f"You drafted: {target_p_data[1]} ({target_p_data[2]})")
+                else:
+                    is_on_my_team = any(ud_p[0] == target_pid for ud_p in USER_DRAFTED_PLAYERS_DATA)
+                    if is_on_my_team: print(f"Player {target_p_data[1]} is already on your team.")
+                    else: print(f"Player {target_p_data[1]} was already drafted globally by another team.")
 
         elif command == 'run':
             print("\nPreparing data for GA run...")
@@ -625,7 +659,7 @@ if __name__ == "__main__":
             temp_available_pool_view = [p for p in INITIAL_PLAYER_POOL_DATA if p[0] not in GLOBALLY_DRAFTED_PLAYER_IDS]
             temp_available_pool_view.sort(key=lambda x: x[3], reverse=True)
 
-            filter_pos_view = action_input[1].upper() if len(action_input) > 1 else None
+            filter_pos_view = args[0].upper() if args else None
             
             print("\n--- Top Available Players ---")
             count_view = 0
