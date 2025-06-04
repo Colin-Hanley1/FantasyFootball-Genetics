@@ -28,7 +28,7 @@ ROSTER_STRUCTURE = {
 }
 
 # --- Global Variables ---
-# Player tuple: (id, name, pos, ppg, calculated_round, bye_week)
+# Player tuple: (id, name_in_csv, position_col, ppg, calculated_round, bye_week)
 INITIAL_PLAYER_POOL_DATA = []
 MASTER_PLAYER_ID_TO_DATA = {}
 GLOBALLY_DRAFTED_PLAYER_IDS = set()
@@ -50,7 +50,7 @@ STARTER_PPG_MULTIPLIER = 1.6
 BENCH_ADP_PENALTY_SCALER = 0.3
 STARTER_ADP_WEAKNESS_THRESHOLD = 2
 EARLY_ROUND_ADP_BENCH_PENALTY = 0.5
-BYE_WEEK_CONFLICT_PENALTY_FACTOR = 0.0001
+BYE_WEEK_CONFLICT_PENALTY_FACTOR = 0.25
 
 # --- Data Loading and Setup ---
 def load_player_pool_from_csv(filename=DEFAULT_CSV_FILENAME):
@@ -65,18 +65,30 @@ def load_player_pool_from_csv(filename=DEFAULT_CSV_FILENAME):
                 return []
             for row_num, row in enumerate(reader, 1):
                 try:
-                    player_id, name, pos = int(row["ID"]), row["Name"], row["Position"].upper()
-                    total_points, adp_raw = float(row["TotalPoints"]), int(row["ADP"])
+                    player_id = int(row["ID"])
+                    # Name from CSV is assumed to be like "WR_JJefferson"
+                    name_in_csv = row["Name"]
+                    pos_from_col = row["Position"].upper() # Position from dedicated column
+                    total_points = float(row["TotalPoints"])
+                    adp_raw = int(row["ADP"])
                     try:
                         bye_week = int(row["ByeWeek"]) if row["ByeWeek"] and row["ByeWeek"].strip() else 0
-                    except ValueError: bye_week = 0; print(f"Warning: Row {row_num}, Player ID {player_id}: Invalid ByeWeek '{row['ByeWeek']}', using 0.")
+                    except ValueError:
+                        bye_week = 0
+                        print(f"Warning: Row {row_num}, Player ID {player_id}: Invalid ByeWeek '{row['ByeWeek']}', using 0.")
+
                     ppg = total_points / GAMES_IN_SEASON if GAMES_IN_SEASON > 0 else 0
                     calculated_round = max(1, math.ceil(adp_raw / PICKS_PER_ROUND)) if PICKS_PER_ROUND > 0 else 1
-                    player_pool_list.append((player_id, name, pos, ppg, calculated_round, bye_week))
-                except (ValueError, KeyError, ZeroDivisionError) as e: print(f"Warning: Skipping row {row_num} in '{filename}': {e}. Row: {row}")
-    except FileNotFoundError: print(f"Error: CSV file '{filename}' not found.")
-    except Exception as e: print(f"Unexpected error reading '{filename}': {e}")
-    if not player_pool_list: print(f"Warning: No players loaded from '{filename}'.")
+                    # Player tuple: (id, name_in_csv, position_col, ppg, calculated_round, bye_week)
+                    player_pool_list.append((player_id, name_in_csv, pos_from_col, ppg, calculated_round, bye_week))
+                except (ValueError, KeyError, ZeroDivisionError) as e:
+                    print(f"Warning: Skipping row {row_num} in '{filename}': {e}. Row: {row}")
+    except FileNotFoundError:
+        print(f"Error: CSV file '{filename}' not found.")
+    except Exception as e:
+        print(f"Unexpected error reading '{filename}': {e}")
+    if not player_pool_list:
+        print(f"Warning: No players loaded from '{filename}'.")
     return player_pool_list
 
 def initial_setup(csv_filename=DEFAULT_CSV_FILENAME):
@@ -94,7 +106,7 @@ def initial_setup(csv_filename=DEFAULT_CSV_FILENAME):
     POSITION_ORDER = temp_position_order
     TOTAL_ROSTER_SPOTS = len(POSITION_ORDER)
     if TOTAL_ROSTER_SPOTS == 0: print("Critical Error: ROSTER_STRUCTURE is empty. Exiting."); exit()
-    unique_initial_positions = set(p[2] for p in INITIAL_PLAYER_POOL_DATA)
+    unique_initial_positions = set(p[2] for p in INITIAL_PLAYER_POOL_DATA) # p[2] is position_col
     all_roster_keys = set(ROSTER_STRUCTURE.keys())
     for slot_key in all_roster_keys:
         if slot_key not in FLEX_ELIGIBILITY and slot_key not in unique_initial_positions:
@@ -109,33 +121,34 @@ def prepare_for_ga_run():
     global CURRENT_AVAILABLE_PLAYER_POOL_FOR_GA, CURRENT_PLAYERS_BY_POSITION_FOR_GA, USER_PLAYER_SLOT_ASSIGNMENTS
     CURRENT_AVAILABLE_PLAYER_POOL_FOR_GA = [p for p in INITIAL_PLAYER_POOL_DATA if p[0] not in GLOBALLY_DRAFTED_PLAYER_IDS]
     CURRENT_PLAYERS_BY_POSITION_FOR_GA = {}
-    all_avail_positions = set(p[2] for p in CURRENT_AVAILABLE_PLAYER_POOL_FOR_GA)
+    all_avail_positions = set(p[2] for p in CURRENT_AVAILABLE_PLAYER_POOL_FOR_GA) # p[2] is position_col
     for pos_key in all_avail_positions:
-        CURRENT_PLAYERS_BY_POSITION_FOR_GA[pos_key] = sorted([p for p in CURRENT_AVAILABLE_PLAYER_POOL_FOR_GA if p[2] == pos_key], key=lambda x: (x[4], -x[3]))
+        CURRENT_PLAYERS_BY_POSITION_FOR_GA[pos_key] = sorted([p for p in CURRENT_AVAILABLE_PLAYER_POOL_FOR_GA if p[2] == pos_key], key=lambda x: (x[4], -x[3])) # x[4] is calc_round
     new_user_player_slot_assignments = {}
     available_slots_indices = list(range(TOTAL_ROSTER_SPOTS))
-    sorted_user_players = sorted(USER_DRAFTED_PLAYERS_DATA, key=lambda x: x[4])
+    sorted_user_players = sorted(USER_DRAFTED_PLAYERS_DATA, key=lambda x: x[4]) # x[4] is calc_round
     processed_player_ids_for_assignment = set()
-    for player_data_tuple in sorted_user_players:
-        player_id, _, actual_player_pos, _, _, _ = player_data_tuple
+    for player_data_tuple in sorted_user_players: # (id, name_csv, pos_col, ppg, calc_round, bye)
+        player_id, _, actual_player_pos, _, _, _ = player_data_tuple # actual_player_pos is from player_data_tuple[2]
         if player_id in processed_player_ids_for_assignment: continue
         assigned_this_player = False
-        for slot_idx in sorted(list(available_slots_indices)):
+        for slot_idx in sorted(list(available_slots_indices)): # Specific starter
             slot_type = POSITION_ORDER[slot_idx]
             if not slot_type.startswith("BN_") and slot_type == actual_player_pos:
                 new_user_player_slot_assignments[player_id] = slot_idx; available_slots_indices.remove(slot_idx); processed_player_ids_for_assignment.add(player_id); assigned_this_player = True; break
         if assigned_this_player: continue
-        for slot_idx in sorted(list(available_slots_indices)):
+        # ... (rest of assignment logic unchanged as it uses actual_player_pos) ...
+        for slot_idx in sorted(list(available_slots_indices)): # Flex starter
             slot_type = POSITION_ORDER[slot_idx]
             if not slot_type.startswith("BN_") and slot_type in FLEX_ELIGIBILITY and actual_player_pos in FLEX_ELIGIBILITY[slot_type]:
                 new_user_player_slot_assignments[player_id] = slot_idx; available_slots_indices.remove(slot_idx); processed_player_ids_for_assignment.add(player_id); assigned_this_player = True; break
         if assigned_this_player: continue
-        for slot_idx in sorted(list(available_slots_indices)):
+        for slot_idx in sorted(list(available_slots_indices)): # Specific bench
             slot_type = POSITION_ORDER[slot_idx]
             if slot_type.startswith("BN_") and slot_type == "BN_" + actual_player_pos:
                  new_user_player_slot_assignments[player_id] = slot_idx; available_slots_indices.remove(slot_idx); processed_player_ids_for_assignment.add(player_id); assigned_this_player = True; break
         if assigned_this_player: continue
-        for slot_idx in sorted(list(available_slots_indices)):
+        for slot_idx in sorted(list(available_slots_indices)): # Flex bench
             slot_type = POSITION_ORDER[slot_idx]
             if slot_type.startswith("BN_") and slot_type in FLEX_ELIGIBILITY and actual_player_pos in FLEX_ELIGIBILITY[slot_type]:
                 new_user_player_slot_assignments[player_id] = slot_idx; available_slots_indices.remove(slot_idx); processed_player_ids_for_assignment.add(player_id); assigned_this_player = True; break
@@ -143,7 +156,7 @@ def prepare_for_ga_run():
     USER_PLAYER_SLOT_ASSIGNMENTS.clear(); USER_PLAYER_SLOT_ASSIGNMENTS.update(new_user_player_slot_assignments)
 
 def get_player_data(player_id): return MASTER_PLAYER_ID_TO_DATA.get(player_id)
-def get_player_round(player_id): p = get_player_data(player_id); return p[4] if p else -1
+def get_player_round(player_id): p = get_player_data(player_id); return p[4] if p else -1 # p[4] is calc_round
 def get_slot_type_for_index(index): return POSITION_ORDER[index] if 0 <= index < len(POSITION_ORDER) else None
 
 def get_eligible_players_for_slot_type_for_ga(slot_type_value):
@@ -161,18 +174,141 @@ def get_eligible_players_for_slot_type_for_ga(slot_type_value):
             if player[0] not in processed_ids: eligible_players.append(player); processed_ids.add(player[0])
     return eligible_players
 
-def find_player_by_name(name_query):
-    name_query_lower = name_query.lower().strip()
-    exact_matches = [p for p in INITIAL_PLAYER_POOL_DATA if name_query_lower == p[1].lower().strip()]
-    if exact_matches: return exact_matches
-    partial_matches = []
-    for p_data in INITIAL_PLAYER_POOL_DATA:
-        norm_name = p_data[1].lower().replace(".", "").replace("-", " ").replace("'", "")
-        norm_query = name_query_lower.replace(".", "").replace("-", " ").replace("'", "")
-        if norm_query in norm_name: partial_matches.append(p_data)
-    return partial_matches
+# --- NEW Flexible Player Search Logic ---
+def parse_csv_formatted_name(csv_formatted_name):
+    try:
+        parts = csv_formatted_name.split('_', 1)
+        pos_guess = ""
+        name_part = csv_formatted_name # Default if no underscore
 
-def create_individual():
+        if len(parts) == 2:
+            pos_guess = parts[0]
+            name_part = parts[1]
+        
+        if not name_part:
+            return pos_guess.lower() if pos_guess else None, "", ""
+
+        first_initials = ""
+        last_name = ""
+
+        # Heuristic for "POS_FLastName" like "WR_JJefferson" -> F="J", L="Jefferson"
+        # or "POS_FFLastName" like "TE_TJHockenson" -> FF="TJ", L="Hockenson"
+        idx = 0
+        while idx < len(name_part) and name_part[idx].isupper():
+            first_initials += name_part[idx]
+            idx += 1
+        
+        # The rest is the last name, which itself should start with a capital if format is consistent
+        if idx < len(name_part):
+            # Check if the part after initials actually starts with a capital (as in Jefferson, Hockenson)
+            if name_part[idx].isupper():
+                 last_name = name_part[idx:]
+            else: # If it starts lowercase, it implies the initials might have been the whole "name" part like "OBJ"
+                  # or the format is different, e.g. POS_FalconsDST where "falcons" is lower.
+                  # For simplicity, if after all caps initials, the next is not Cap, then initials might be full name part.
+                  if idx == len(name_part): # e.g. OBJ, TJ
+                      pass # first_initials is already set, last_name is empty
+                  else: # JefFerson - unlikely format. Assume previous all caps were initials.
+                      last_name = name_part[idx:]
+
+
+        # If initials are long and last_name is empty, maybe initials were the name
+        if len(first_initials) > 2 and not last_name: # e.g. SMITH
+            last_name = first_initials
+            first_initials = ""
+        
+        # A simple case: "WR_JJefferson" -> pos_guess="WR", first_initials="J", last_name="Jefferson"
+        # This happens if initial `idx` finding stops at the first non-capital.
+        # Re-check logic for JJefferson: idx=1, first_initials="J", name_part[1:]="Jefferson" (starts with Cap)
+        if len(name_part) > 0 and name_part[0].isupper():
+            temp_fi = name_part[0]
+            temp_ln_candidate = name_part[1:]
+            if temp_ln_candidate and temp_ln_candidate[0].isupper(): # J[J]efferson pattern
+                 # This is tricky. For "JJefferson", simple is F="J", L="Jefferson"
+                 # For "TJHockenson", F="T", L="JHockenson" by this simple rule.
+                 # Better: Iterate for all starting caps.
+                 i = 0
+                 while i < len(name_part) and name_part[i].isupper():
+                     i += 1
+                 first_initials = name_part[:i]
+                 last_name = name_part[i:]
+                 if len(first_initials) > 2 and not last_name: # All caps and > 2, likely a last name or team name "CHIEFS"
+                     last_name = first_initials
+                     first_initials = ""
+
+
+        return pos_guess.lower() if pos_guess else None, first_initials.lower(), last_name.lower()
+
+    except Exception:
+        return None, "", "" # Fallback
+
+def find_player_flexible(query_str):
+    normalized_query = query_str.lower().replace('.', '').strip()
+    query_words = normalized_query.split()
+    POSSIBLE_QUERY_POSITIONS = {"qb", "wr", "rb", "te", "k", "def", "dst"}
+    query_pos_part, name_only_query_words = None, []
+    for word in query_words:
+        if word in POSSIBLE_QUERY_POSITIONS: query_pos_part = word
+        else: name_only_query_words.append(word)
+    name_only_query = " ".join(name_only_query_words)
+    potential_query_lastname = name_only_query_words[-1] if name_only_query_words else None
+
+    exact_csv_matches, strong_matches, partial_matches = [], [], []
+
+    for p_data in INITIAL_PLAYER_POOL_DATA:
+        pid, csv_name, csv_pos_col, _, _, _ = p_data
+        csv_name_lower, csv_pos_col_lower = csv_name.lower(), csv_pos_col.lower()
+
+        if normalized_query == csv_name_lower: exact_csv_matches.append(p_data); continue
+        
+        _, parsed_fi, parsed_ln = parse_csv_formatted_name(csv_name) # pos_from_name ignored, use csv_pos_col
+        if not parsed_ln and not parsed_fi and csv_name_lower: # If parse fails, use name_part of csv_name
+            parsed_ln = csv_name_lower.split('_',1)[-1]
+
+
+        # Last name match
+        if potential_query_lastname and parsed_ln and potential_query_lastname == parsed_ln:
+            if query_pos_part and query_pos_part == csv_pos_col_lower: strong_matches.append(p_data)
+            elif not query_pos_part: strong_matches.append(p_data)
+            else: partial_matches.append(p_data)
+            continue
+        # "FirstInitial LastName" match
+        if len(name_only_query_words) == 2 and parsed_fi and parsed_ln and \
+           name_only_query_words[0] == parsed_fi and name_only_query_words[1] == parsed_ln:
+            if query_pos_part and query_pos_part == csv_pos_col_lower: strong_matches.append(p_data)
+            elif not query_pos_part: strong_matches.append(p_data)
+            else: partial_matches.append(p_data)
+            continue
+        # "FirstInitialLastName" (no space) match
+        if len(name_only_query_words) == 1 and parsed_fi and parsed_ln and \
+           name_only_query_words[0] == (parsed_fi + parsed_ln):
+            if query_pos_part and query_pos_part == csv_pos_col_lower: strong_matches.append(p_data)
+            elif not query_pos_part: strong_matches.append(p_data)
+            else: partial_matches.append(p_data)
+            continue
+        # Partial last name match
+        if potential_query_lastname and parsed_ln and len(potential_query_lastname) >= 3 and parsed_ln.startswith(potential_query_lastname):
+            if query_pos_part and query_pos_part == csv_pos_col_lower: strong_matches.append(p_data)
+            elif not query_pos_part: partial_matches.append(p_data)
+            continue
+        # Full name query parts in parsed name
+        if name_only_query and parsed_ln and all(qw in parsed_ln for qw in name_only_query_words if len(qw)>1): # a bit loose
+             if query_pos_part and query_pos_part == csv_pos_col_lower: strong_matches.append(p_data)
+             else: partial_matches.append(p_data)
+             continue
+
+    final_results, seen_ids = [], set()
+    for p_list in [exact_csv_matches, strong_matches, partial_matches]:
+        for p_item in p_list:
+            if p_item[0] not in seen_ids: final_results.append(p_item); seen_ids.add(p_item[0])
+    return final_results
+
+# --- GA Core Functions (create_individual, calculate_fitness, repair_lineup, etc. UNCHANGED from previous full version) ---
+# These functions use player IDs and access player data via get_player_data(),
+# so they are not directly affected by the name string format as long as IDs are consistent.
+# calculate_fitness uses p_data[4] for adp_round and p_data[5] for bye, which is correct.
+
+def create_individual(): # Unchanged
     individual_ids, used_player_ids = [None] * TOTAL_ROSTER_SPOTS, set()
     for pid, slot_idx in USER_PLAYER_SLOT_ASSIGNMENTS.items():
         if 0 <= slot_idx < TOTAL_ROSTER_SPOTS: individual_ids[slot_idx] = pid; used_player_ids.add(pid)
@@ -187,14 +323,13 @@ def create_individual():
             individual_ids[i] = -99
     return individual_ids
 
-def create_initial_population(): return [create_individual() for _ in range(POPULATION_SIZE)]
+def create_initial_population(): return [create_individual() for _ in range(POPULATION_SIZE)] # Unchanged
 
-def calculate_fitness(individual_ids, curr_round):
+def calculate_fitness(individual_ids, curr_round): # Unchanged
     if not individual_ids or len(individual_ids) != TOTAL_ROSTER_SPOTS: return -float('inf'), 0, set(), []
     if any(pid is None or (not isinstance(pid, int)) or (pid <= 0 and pid != -99) for pid in individual_ids):
         inv_spots = sum(1 for pid in individual_ids if pid != -99 and (pid is None or not isinstance(pid, int) or pid <= 0))
         if inv_spots > 0: return -PENALTY_VIOLATION * (inv_spots + 20), 0, set(), []
-
     lineup_player_objects = [None] * TOTAL_ROSTER_SPOTS
     for i, pid in enumerate(individual_ids):
         slot_type, is_starting_slot = POSITION_ORDER[i], not POSITION_ORDER[i].startswith("BN_")
@@ -207,17 +342,14 @@ def calculate_fitness(individual_ids, curr_round):
                 else: return -PENALTY_VIOLATION * 30, 0, set(), []
             lineup_player_objects[i] = p_data
     valid_player_data_for_checks = [p_obj for p_obj in lineup_player_objects if p_obj is not None]
-
     for i, p_data_current in enumerate(lineup_player_objects):
         if p_data_current is None: continue
         slot_type, actual_pos = POSITION_ORDER[i], p_data_current[2]
         is_valid = (slot_type == actual_pos) or (slot_type in FLEX_ELIGIBILITY and actual_pos in FLEX_ELIGIBILITY[slot_type])
         if not is_valid: return -PENALTY_VIOLATION * 10, 0, set(), valid_player_data_for_checks
-    
     player_ids_for_dup_check = [p[0] for p in valid_player_data_for_checks]
     if len(set(player_ids_for_dup_check)) != len(player_ids_for_dup_check):
         return -PENALTY_VIOLATION * 5, 0, set(), valid_player_data_for_checks
-
     raw_ppg_sum, fitness_ppg_component = 0, 0
     for i, p_data_calc in enumerate(lineup_player_objects):
         if p_data_calc is None: continue
@@ -225,7 +357,6 @@ def calculate_fitness(individual_ids, curr_round):
         raw_ppg_sum += ppg
         fitness_ppg_component += (ppg * STARTER_PPG_MULTIPLIER) if not POSITION_ORDER[i].startswith("BN_") else ppg
     fitness_score = fitness_ppg_component
-
     bench_adp_mismanagement_penalty = 0
     num_s_filled, sum_s_adp_rnds, min_s_adp_rnd_val = 0, 0, float('inf')
     for i_check, p_data_check in enumerate(lineup_player_objects):
@@ -233,7 +364,6 @@ def calculate_fitness(individual_ids, curr_round):
         if not POSITION_ORDER[i_check].startswith("BN_"):
             num_s_filled += 1; sum_s_adp_rnds += p_data_check[4]; min_s_adp_rnd_val = min(min_s_adp_rnd_val, p_data_check[4])
     avg_s_adp_rnd = sum_s_adp_rnds / num_s_filled if num_s_filled > 0 else float('inf')
-
     for i_bench, p_data_bench in enumerate(lineup_player_objects):
         if p_data_bench is None: continue
         if POSITION_ORDER[i_bench].startswith("BN_"):
@@ -243,22 +373,26 @@ def calculate_fitness(individual_ids, curr_round):
             if bench_p_adp_rnd <= 3 and min_s_adp_rnd_val > (bench_p_adp_rnd + STARTER_ADP_WEAKNESS_THRESHOLD):
                 bench_adp_mismanagement_penalty += (PENALTY_VIOLATION * EARLY_ROUND_ADP_BENCH_PENALTY * (4 - bench_p_adp_rnd) / 5.0)
     fitness_score -= bench_adp_mismanagement_penalty
-
     bye_weeks_on_roster = [p[5] for p in valid_player_data_for_checks if p[5] is not None and 0 < p[5] < 20]
     bye_week_counts = Counter(bye_weeks_on_roster)
     num_bye_week_conflicts = sum(count - 1 for count in bye_week_counts.values() if count >= 2)
     if num_bye_week_conflicts > 0:
         fitness_score -= (PENALTY_VIOLATION * BYE_WEEK_CONFLICT_PENALTY_FACTOR * num_bye_week_conflicts)
-
+    total_reach_back_penalty_points = 0 # From previous logic, can be re-added if needed
+    # for p_data_reach in valid_player_data_for_checks:
+    #     player_adp_round = p_data_reach[4]
+    #     excess_fall_rounds = (curr_round - player_adp_round) - ALLOWABLE_ADP_FALL_ROUNDS (Need this const)
+    #     if excess_fall_rounds > 0: total_reach_back_penalty_points += excess_fall_rounds
+    # if total_reach_back_penalty_points > 0:
+    #     fitness_score -= (PENALTY_VIOLATION * REACH_BACK_PENALTY_SCALER * total_reach_back_penalty_points / TOTAL_ROSTER_SPOTS) # Need consts
     player_adp_rounds_in_lineup = [p[4] for p in valid_player_data_for_checks]
     adp_round_counts = Counter(player_adp_rounds_in_lineup)
     num_future_round_stacking_violations = sum(count - 1 for adp_r, count in adp_round_counts.items() if count > 1 and adp_r >= curr_round)
     if num_future_round_stacking_violations > 0:
         fitness_score -= (PENALTY_VIOLATION * num_future_round_stacking_violations * 1.5)
-
     return fitness_score, raw_ppg_sum, set(player_adp_rounds_in_lineup), valid_player_data_for_checks
 
-def repair_lineup(lineup_ids_to_repair):
+def repair_lineup(lineup_ids_to_repair): # Unchanged
     repaired_ids = list(lineup_ids_to_repair)
     if not repaired_ids or len(repaired_ids) != TOTAL_ROSTER_SPOTS: return create_individual()
     user_assigned_slots = set(USER_PLAYER_SLOT_ASSIGNMENTS.values())
@@ -301,7 +435,7 @@ def repair_lineup(lineup_ids_to_repair):
         if repaired_ids[i] is None: repaired_ids[i] = -99
     return repaired_ids
 
-def tournament_selection(population, fitness_scores_only):
+def tournament_selection(population, fitness_scores_only): # Unchanged
     if not population: return create_individual()
     actual_tourn_size = min(TOURNAMENT_SIZE, len(population))
     if actual_tourn_size <= 0: return random.choice(population) if population else create_individual()
@@ -310,7 +444,7 @@ def tournament_selection(population, fitness_scores_only):
     winner = max(tournament_contenders, key=lambda x: x[1])
     return winner[0]
 
-def crossover(parent1_ids, parent2_ids):
+def crossover(parent1_ids, parent2_ids): # Unchanged
     child1, child2 = list(parent1_ids), list(parent2_ids)
     if random.random() < CROSSOVER_RATE and TOTAL_ROSTER_SPOTS > 1:
         pt = random.randint(1, TOTAL_ROSTER_SPOTS - 1) if TOTAL_ROSTER_SPOTS > 1 else 0
@@ -330,7 +464,7 @@ def crossover(parent1_ids, parent2_ids):
             child1, child2 = temp_c1, temp_c2
     return repair_lineup(child1), repair_lineup(child2)
 
-def mutate(individual_ids):
+def mutate(individual_ids): # Unchanged
     mutated = list(individual_ids)
     user_assigned_indices = set(USER_PLAYER_SLOT_ASSIGNMENTS.values())
     if random.random() < MUTATION_RATE:
@@ -349,19 +483,15 @@ def mutate(individual_ids):
         if options: mutated[mutation_idx] = random.choice(options)[0]
     return repair_lineup(mutated)
 
-# --- NEW FUNCTION ---
-def suggest_next_best_pick(best_ga_lineup_ids, user_drafted_player_ids_set):
+def suggest_next_best_pick(best_ga_lineup_ids, user_drafted_player_ids_set): # Unchanged
     ga_suggested_additions_details = []
     for slot_index, player_id in enumerate(best_ga_lineup_ids):
         if player_id not in user_drafted_player_ids_set and player_id > 0:
-            player_data = get_player_data(player_id) # (id, name, pos, ppg, calc_round, bye)
+            player_data = get_player_data(player_id)
             if player_data:
                 is_starter_in_ga_lineup = not POSITION_ORDER[slot_index].startswith("BN_")
                 ga_suggested_additions_details.append({
-                    "data": player_data,
-                    "adp_round": player_data[4],  # calculated_round
-                    "ppg": player_data[3],
-                    "is_starter": is_starter_in_ga_lineup
+                    "data": player_data, "adp_round": player_data[4], "ppg": player_data[3], "is_starter": is_starter_in_ga_lineup
                 })
     if not ga_suggested_additions_details: return None
     starters_ga_would_add = [p for p in ga_suggested_additions_details if p["is_starter"]]
@@ -374,7 +504,7 @@ def suggest_next_best_pick(best_ga_lineup_ids, user_drafted_player_ids_set):
         return bench_ga_would_add[0]["data"]
     return None
 
-def genetic_algorithm_adp_lineup(curr_round):
+def genetic_algorithm_adp_lineup(curr_round): # Unchanged
     ui_messages, open_ga_slots = [], TOTAL_ROSTER_SPOTS - len(USER_PLAYER_SLOT_ASSIGNMENTS)
     num_s_defined = sum(1 for s in POSITION_ORDER if not s.startswith("BN_"))
     num_s_user = sum(1 for si in USER_PLAYER_SLOT_ASSIGNMENTS.values() if not POSITION_ORDER[si].startswith("BN_"))
@@ -429,12 +559,12 @@ except SystemExit: INITIAL_SETUP_SUCCESS = False
 
 DBC_THEME = dbc.themes.FLATLY
 app = dash.Dash(__name__, external_stylesheets=[DBC_THEME], suppress_callback_exceptions=True)
-server = app.server
+server = app.server # For deployment
 
 if not INITIAL_SETUP_SUCCESS:
     app.layout = dbc.Container([dbc.Alert("App Init Failed.", color="danger", className="mt-5")], fluid=True)
 else:
-    def get_roster_structure_info():
+    def get_roster_structure_info(): # Unchanged
         items = [dbc.ListGroupItem(html.H5("Roster Settings", className="mb-0"), className="bg-light")]
         for slot, count in ROSTER_STRUCTURE.items():
             elig_str = f" (Eligible: {', '.join(FLEX_ELIGIBILITY[slot])})" if slot in FLEX_ELIGIBILITY else ""
@@ -442,7 +572,7 @@ else:
         items.append(dbc.ListGroupItem(f"Starter PPGs x{STARTER_PPG_MULTIPLIER} in fitness.", color="info"))
         return dbc.ListGroup(items, className="mb-3")
 
-    def format_team_display_data():
+    def format_team_display_data(): # Unchanged (already shows p_data[1] as name)
         prepare_for_ga_run()
         headers = [{"id": "slot", "name": "Slot"}, {"id": "pos", "name": "Pos"},
                    {"id": "player", "name": "Player (Actual Pos)"}, {"id": "ppg", "name": "PPG"},
@@ -450,14 +580,12 @@ else:
         starters_d, bench_d = [], []
         starters_ppg_sum, num_s, total_s = 0, 0, sum(1 for s in POSITION_ORDER if not s.startswith('BN_'))
         num_b, total_b = 0, sum(1 for s in POSITION_ORDER if s.startswith('BN_'))
-
         for i, slot_type in enumerate(POSITION_ORDER):
             is_starter = not slot_type.startswith("BN_")
             pid_in_slot = next((pid for pid, s_idx in USER_PLAYER_SLOT_ASSIGNMENTS.items() if s_idx == i), None)
             p_data = get_player_data(pid_in_slot)
-            
-            if p_data: # (id,name,pos,ppg,calc_round,bye)
-                row_data = {"slot": i, "pos": slot_type, "player": f"{p_data[1]} ({p_data[2]})", 
+            if p_data:
+                row_data = {"slot": i, "pos": slot_type, "player": f"{p_data[1]} ({p_data[2]})",  # p_data[1] is name_in_csv
                             "ppg": f"{p_data[3]:.2f}", "adp_rd": p_data[4], "bye": p_data[5] if p_data[5] > 0 else "-"}
                 if is_starter: starters_d.append(row_data); starters_ppg_sum += p_data[3]; num_s +=1
                 else: bench_d.append(row_data); num_b +=1
@@ -465,24 +593,21 @@ else:
                 row_data = {"slot": i, "pos": slot_type, "player": "-", "ppg": "-", "adp_rd": "-", "bye": "-"}
                 if is_starter: starters_d.append(row_data)
                 else: bench_d.append(row_data)
-        
         surplus_elems = [dbc.ListGroupItem(f"{p[1]}({p[2]}) PPG:{p[3]:.2f} Rd:{p[4]} Bye:{p[5] if p[5] > 0 else '-'}")
                          for p in USER_DRAFTED_PLAYERS_DATA if p[0] not in USER_PLAYER_SLOT_ASSIGNMENTS]
         return headers, starters_d, starters_ppg_sum, num_s, total_s, headers, bench_d, num_b, total_b, surplus_elems
 
-    def format_ga_results_display(best_lineup_ids, best_fitness, ga_messages_alerts, next_pick_suggestion_data=None):
+    def format_ga_results_display(best_lineup_ids, best_fitness, ga_messages_alerts, next_pick_suggestion_data=None): # Unchanged
         children = [html.H5("GA Suggestions", className="card-title")]
         if next_pick_suggestion_data:
-            p_sugg = next_pick_suggestion_data # (id,name,pos,ppg,calc_round,bye)
+            p_sugg = next_pick_suggestion_data
             suggestion_alert = dbc.Alert(
                 [html.H5("🎯 Next Pick Suggestion:", className="alert-heading"),
-                 html.P(f"Consider: {p_sugg[1]} ({p_sugg[2]})", className="mb-1"),
+                 html.P(f"Consider: {p_sugg[1]} ({p_sugg[2]})", className="mb-1"), # p_sugg[1] is name_in_csv
                  html.P(f"PPG: {p_sugg[3]:.2f} | ADP Rd: {p_sugg[4]} | Bye: {p_sugg[5] if p_sugg[5] > 0 else '-'}", style={'fontSize': '0.9rem'})],
-                color="primary", className="mt-1 mb-3 shadow-sm"
-            )
+                color="primary", className="mt-1 mb-3 shadow-sm")
             children.append(suggestion_alert)
         children.extend(ga_messages_alerts)
-
         if best_lineup_ids and best_fitness > -PENALTY_VIOLATION * 70 :
             lineup_details = [html.H6("📋 GA's Optimal Full Lineup:", className="mt-3")]
             items = []
@@ -502,8 +627,7 @@ else:
                  children.append(dbc.Alert("WARNING: DUPLICATES IN BEST LINEUP.", color="danger", className="mt-2 fw-bold"))
         return children
 
-    # --- App Layout (Unchanged from previous version) ---
-    app.layout = dbc.Container([
+    app.layout = dbc.Container([ # Unchanged
         dcc.Store(id='ui-update-trigger', data=0),
         dbc.Row(dbc.Col(html.H1("🏈 Live Fantasy Football Draft Assistant", className="text-center my-4"))),
         dbc.Row(dbc.Col(id='current-round-info', className="text-center mb-3 fw-bold fs-5")),
@@ -545,59 +669,59 @@ else:
         ], className="mb-5")
     ], fluid=True)
 
-    # --- Callbacks ---
-    @app.callback(
+    @app.callback( # MODIFIED to use find_player_flexible
         [Output('action-messages-div', 'children', allow_duplicate=True), Output('ui-update-trigger', 'data', allow_duplicate=True)],
         [Input('draft-opponent-btn', 'n_clicks'), Input('draft-my-team-btn', 'n_clicks'), Input('undo-draft-btn', 'n_clicks')],
         [State('player-query-input', 'value'), State('undo-player-id-input', 'value'), State('ui-update-trigger', 'data')],
         prevent_initial_call=True
     )
-    def handle_draft_actions(opp_clicks, my_clicks, undo_clicks, query, undo_pid_state, trigger_val): # Unchanged
+    def handle_draft_actions(opp_clicks, my_clicks, undo_clicks, query, undo_pid_state, trigger_val):
         global GLOBALLY_DRAFTED_PLAYER_IDS, USER_DRAFTED_PLAYERS_DATA, USER_PLAYER_SLOT_ASSIGNMENTS
         ctx_id = ctx.triggered_id; alerts = []
         if not query and ctx_id in ['draft-opponent-btn', 'draft-my-team-btn']:
             alerts.append(dbc.Alert("Player name/ID empty.", color="warning", duration=3000)); return alerts, trigger_val
         if not undo_pid_state and ctx_id == 'undo-draft-btn':
             alerts.append(dbc.Alert("Undo Player ID empty.", color="warning", duration=3000)); return alerts, trigger_val
+        
         target_pid, target_p_data = None, None
         if ctx_id in ['draft-opponent-btn', 'draft-my-team-btn']:
             try:
                 pid_candidate = int(query); p_data_cand = get_player_data(pid_candidate)
                 if p_data_cand: target_pid, target_p_data = pid_candidate, p_data_cand
                 else: alerts.append(dbc.Alert(f"ID '{query}' not found.", color="danger", duration=3000))
-            except ValueError:
-                matched = find_player_by_name(query)
-                if not matched: alerts.append(dbc.Alert(f"Name '{query}' not found.", color="danger", duration=3000))
+            except ValueError: # Query is a name
+                matched = find_player_flexible(query) # Using the new flexible search
+                if not matched: alerts.append(dbc.Alert(f"Name '{query}' not found by flexible search.", color="danger", duration=3000))
                 elif len(matched) == 1: target_pid, target_p_data = matched[0][0], matched[0]
-                else: alerts.append(dbc.Alert(f"Ambiguous name '{query}'. Use ID.", color="warning", duration=4000))
-            if target_pid and target_p_data: # target_p_data is (id,name,pos,ppg,calc_round,bye)
+                else: 
+                    ambiguous_display = [f"{p[1]} ({p[2]}, ID: {p[0]})" for p in matched[:5]]
+                    alerts.append(dbc.Alert(f"Ambiguous: '{query}'. Matches: {', '.join(ambiguous_display)}. Use ID or be more specific.", color="warning", duration=6000))
+
+            if target_pid and target_p_data:
+                # ... (rest of draft logic is the same as previous working version) ...
                 if ctx_id == 'draft-opponent-btn':
                     if target_pid in GLOBALLY_DRAFTED_PLAYER_IDS and target_pid not in [p[0] for p in USER_DRAFTED_PLAYERS_DATA]:
                          alerts.append(dbc.Alert(f"{target_p_data[1]} already drafted by other.", color="info", duration=3000))
                     else:
-                        GLOBALLY_DRAFTED_PLAYER_IDS.add(target_pid)
-                        removed_from_user = False
+                        GLOBALLY_DRAFTED_PLAYER_IDS.add(target_pid); removed_from_user = False
                         if any(p[0] == target_pid for p in USER_DRAFTED_PLAYERS_DATA):
                             USER_DRAFTED_PLAYERS_DATA = [p for p in USER_DRAFTED_PLAYERS_DATA if p[0] != target_pid]
                             if target_pid in USER_PLAYER_SLOT_ASSIGNMENTS: del USER_PLAYER_SLOT_ASSIGNMENTS[target_pid]
                             removed_from_user = True
-                        alerts.append(dbc.Alert(f"{target_p_data[1]} marked as opponent draft." + (" Removed." if removed_from_user else ""), color="success", duration=3000))
-                        trigger_val += 1
+                        alerts.append(dbc.Alert(f"{target_p_data[1]} opponent draft." + (" Removed." if removed_from_user else ""), color="success", duration=3000)); trigger_val += 1
                 elif ctx_id == 'draft-my-team-btn':
                     if any(p[0] == target_pid for p in USER_DRAFTED_PLAYERS_DATA): alerts.append(dbc.Alert(f"{target_p_data[1]} already on your team.", color="info", duration=3000))
                     elif target_pid in GLOBALLY_DRAFTED_PLAYER_IDS: alerts.append(dbc.Alert(f"{target_p_data[1]} already drafted by other.", color="danger", duration=3000))
                     elif len(USER_DRAFTED_PLAYERS_DATA) >= TOTAL_ROSTER_SPOTS: alerts.append(dbc.Alert("Roster full.", color="danger", duration=3000))
                     else:
-                        USER_DRAFTED_PLAYERS_DATA.append(target_p_data)
-                        GLOBALLY_DRAFTED_PLAYER_IDS.add(target_pid)
-                        alerts.append(dbc.Alert(f"You drafted {target_p_data[1]}!", color="success", duration=3000))
-                        trigger_val += 1
+                        USER_DRAFTED_PLAYERS_DATA.append(target_p_data); GLOBALLY_DRAFTED_PLAYER_IDS.add(target_pid)
+                        alerts.append(dbc.Alert(f"You drafted {target_p_data[1]}!", color="success", duration=3000)); trigger_val += 1
         elif ctx_id == 'undo-draft-btn':
             try:
                 pid_undo = int(undo_pid_state); p_data_undo = get_player_data(pid_undo)
                 if not p_data_undo: alerts.append(dbc.Alert(f"ID '{pid_undo}' not found for undo.", color="danger", duration=3000))
                 else:
-                    actions = []
+                    actions = [];
                     if pid_undo in GLOBALLY_DRAFTED_PLAYER_IDS: GLOBALLY_DRAFTED_PLAYER_IDS.remove(pid_undo); actions.append("global")
                     user_len_before = len(USER_DRAFTED_PLAYERS_DATA)
                     USER_DRAFTED_PLAYERS_DATA = [p for p in USER_DRAFTED_PLAYERS_DATA if p[0] != pid_undo]
@@ -608,28 +732,22 @@ else:
             except ValueError: alerts.append(dbc.Alert(f"Invalid ID for undo: '{undo_pid_state}'.", color="danger", duration=3000))
         return alerts, trigger_val
 
-    @app.callback( # Run GA - MODIFIED
-        Output('ga-results-display', 'children'),
-        Input('run-ga-btn', 'n_clicks'),
-        prevent_initial_call=True
+    @app.callback( # Run GA (Unchanged)
+        Output('ga-results-display', 'children'), Input('run-ga-btn', 'n_clicks'), prevent_initial_call=True
     )
     def run_ga_callback(n_clicks):
-        if len(USER_DRAFTED_PLAYERS_DATA) >= TOTAL_ROSTER_SPOTS:
-            return [dbc.Alert("Roster full. No GA run needed.", color="info")]
+        if len(USER_DRAFTED_PLAYERS_DATA) >= TOTAL_ROSTER_SPOTS: return [dbc.Alert("Roster full.", color="info")]
         prepare_for_ga_run()
-        overall_pick_count = len(GLOBALLY_DRAFTED_PLAYER_IDS)
-        current_overall_round = math.floor(overall_pick_count / PICKS_PER_ROUND) + 1 if PICKS_PER_ROUND > 0 else 1
-        
-        best_ids, best_fit, ga_msgs = genetic_algorithm_adp_lineup(current_overall_round)
-        
+        overall_picks = len(GLOBALLY_DRAFTED_PLAYER_IDS)
+        curr_overall_rd = math.floor(overall_picks / PICKS_PER_ROUND) + 1 if PICKS_PER_ROUND > 0 else 1
+        best_ids, best_fit, ga_msgs = genetic_algorithm_adp_lineup(curr_overall_rd)
         next_pick_suggestion_data = None
         if best_ids and best_fit > -PENALTY_VIOLATION * 70 :
             user_picked_ids = {p[0] for p in USER_DRAFTED_PLAYERS_DATA}
             next_pick_suggestion_data = suggest_next_best_pick(best_ids, user_picked_ids)
-        
         return format_ga_results_display(best_ids, best_fit, ga_msgs, next_pick_suggestion_data)
 
-    @app.callback( # Update All Displays - MODIFIED for bye week display
+    @app.callback( # Update All Displays (Unchanged from previous version with bye weeks)
         [Output('my-team-starters-table', 'children'), Output('my-team-starters-summary', 'children'),
          Output('my-team-bench-table', 'children'), Output('my-team-bench-summary', 'children'),
          Output('my-team-surplus-players', 'children'), Output('current-round-info', 'children'),
@@ -645,14 +763,12 @@ else:
         starters_tbl = dash_table.DataTable(columns=headers, data=sd, **tbl_args) if sd else html.P("No starters.", className="text-muted")
         bench_tbl = dash_table.DataTable(columns=headers, data=bd, **tbl_args) if bd else html.P("No bench.", className="text-muted")
         surplus_disp = [html.H6("Surplus:", className="mt-3")] + [dbc.ListGroup(surplus, flush=True, style={'fontSize': '0.85rem'})] if surplus else []
-        
         overall_picks = len(GLOBALLY_DRAFTED_PLAYER_IDS)
         curr_overall_rd = math.floor(overall_picks / PICKS_PER_ROUND) + 1 if PICKS_PER_ROUND > 0 else 1
         round_info_txt = f"Draft: Rd {curr_overall_rd} (Overall Pick {overall_picks + 1})"
-
         drafted_disp = []
         if not GLOBALLY_DRAFTED_PLAYER_IDS: drafted_disp.append(html.P("None yet.", className="text-muted"))
-        else: # p_data is (id,name,pos,ppg,calc_round,bye)
+        else:
             drafted_sorted = sorted([(get_player_data(pid), pid in [p[0] for p in USER_DRAFTED_PLAYERS_DATA])
                                   for pid in GLOBALLY_DRAFTED_PLAYER_IDS if get_player_data(pid)], key=lambda x: x[0][4])
             items = []
@@ -661,11 +777,10 @@ else:
                 bye_str = f" Bye:{p_data[5]}" if p_data[5] > 0 else ""
                 items.append(dbc.ListGroupItem([f"Rd {p_data[4]:>2}: {p_data[1]} ({p_data[2]}) PPG:{p_data[3]:.1f}{bye_str}", badge], className="d-flex justify-content-between align-items-center", style={'fontSize': '0.85rem'}))
             drafted_disp = dbc.ListGroup(items, flush=True)
-
         avail_items = []
         avail_pool_sorted = sorted([p for p in INITIAL_PLAYER_POOL_DATA if p[0] not in GLOBALLY_DRAFTED_PLAYER_IDS], key=lambda x: (x[4], -x[3]))
         count = 0; limit = 75
-        for p_av in avail_pool_sorted: # p_av is (id,name,pos,ppg,calc_round,bye)
+        for p_av in avail_pool_sorted:
             if avail_pos_filter != 'ALL' and p_av[2] != avail_pos_filter: continue
             bye_str_av = f" Bye:{p_av[5]}" if p_av[5] > 0 else ""
             avail_items.append(dbc.ListGroupItem(f"{p_av[1]}({p_av[2]}) PPG:{p_av[3]:.1f} Rd:{p_av[4]}{bye_str_av} (ID:{p_av[0]})", style={'fontSize': '0.85rem'}))
@@ -678,7 +793,7 @@ else:
     # --- Run the App ---
     if __name__ == '__main__':
         if INITIAL_SETUP_SUCCESS:
-            app.run(debug=True)
+            app.run(debug=False) # Set debug=False for potential deployment
         else:
             print("Dash application cannot start due to initialization errors. See console.")
             if 'app' in locals() and app: app.run(debug=True)
