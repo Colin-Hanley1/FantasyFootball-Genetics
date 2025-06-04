@@ -678,6 +678,7 @@ else:
     if __name__ == '__main__':
         if INITIAL_SETUP_SUCCESS:
             app.run(debug=True)
+            server = app.server
         else:
             print("Dash application cannot start due to initialization errors. See console.")
             if 'app' in locals() and app: app.run(debug=True)
