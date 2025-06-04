@@ -16,19 +16,18 @@ PICKS_PER_ROUND = 12
 DEFAULT_CSV_FILENAME = "player_pool.csv"
 GA_LOG_FILENAME = "ga_training_log.csv"
 
-# --- Roster Configuration ---
+# --- Roster Configuration (Initial Default) ---
 FLEX_ELIGIBILITY = {
     "W/R/T": ("WR", "RB", "TE"), "W/R": ("WR", "RB"), "R/T": ("RB", "TE"),
     "SUPERFLEX": ("QB", "WR", "RB", "TE"), "BN_SUPERFLEX": ("QB", "WR", "RB", "TE"),
     "BN_FLX": ("WR", "RB", "TE")
 }
-ROSTER_STRUCTURE = {
+ROSTER_STRUCTURE = { # This is the initial default, can be changed by UI
     "QB": 1, "RB": 2, "WR": 2, "TE": 1, "W/R/T": 1,
     "BN_SUPERFLEX": 1, "BN_FLX": 4
 }
 
 # --- Global Variables ---
-# Player tuple: (id, name_in_csv, position_col, ppg, calculated_round, bye_week)
 INITIAL_PLAYER_POOL_DATA = []
 MASTER_PLAYER_ID_TO_DATA = {}
 GLOBALLY_DRAFTED_PLAYER_IDS = set()
@@ -50,7 +49,7 @@ STARTER_PPG_MULTIPLIER = 1.6
 BENCH_ADP_PENALTY_SCALER = 0.3
 STARTER_ADP_WEAKNESS_THRESHOLD = 2
 EARLY_ROUND_ADP_BENCH_PENALTY = 0.5
-BYE_WEEK_CONFLICT_PENALTY_FACTOR = 0.001
+BYE_WEEK_CONFLICT_PENALTY_FACTOR = 0.002
 
 # --- Data Loading and Setup ---
 def load_player_pool_from_csv(filename=DEFAULT_CSV_FILENAME):
@@ -65,54 +64,50 @@ def load_player_pool_from_csv(filename=DEFAULT_CSV_FILENAME):
                 return []
             for row_num, row in enumerate(reader, 1):
                 try:
-                    player_id = int(row["ID"])
-                    name_in_csv = row["Name"]
-                    pos_from_col = row["Position"].upper()
-                    total_points = float(row["TotalPoints"])
-                    adp_raw = int(row["ADP"])
+                    player_id, name_in_csv, pos_from_col = int(row["ID"]), row["Name"], row["Position"].upper()
+                    total_points, adp_raw = float(row["TotalPoints"]), int(row["ADP"])
                     try:
                         bye_week = int(row["ByeWeek"]) if row["ByeWeek"] and row["ByeWeek"].strip() else 0
-                    except ValueError:
-                        bye_week = 0
-                        print(f"Warning: Row {row_num}, Player ID {player_id}: Invalid ByeWeek '{row['ByeWeek']}', using 0.")
+                    except ValueError: bye_week = 0; print(f"Warning: Row {row_num}, Player ID {player_id}: Invalid ByeWeek '{row['ByeWeek']}', using 0.")
                     ppg = total_points / GAMES_IN_SEASON if GAMES_IN_SEASON > 0 else 0
                     calculated_round = max(1, math.ceil(adp_raw / PICKS_PER_ROUND)) if PICKS_PER_ROUND > 0 else 1
                     player_pool_list.append((player_id, name_in_csv, pos_from_col, ppg, calculated_round, bye_week))
-                except (ValueError, KeyError, ZeroDivisionError) as e:
-                    print(f"Warning: Skipping row {row_num} in '{filename}': {e}. Row: {row}")
-    except FileNotFoundError:
-        print(f"Error: CSV file '{filename}' not found.")
-    except Exception as e:
-        print(f"Unexpected error reading '{filename}': {e}")
-    if not player_pool_list:
-        print(f"Warning: No players loaded from '{filename}'.")
+                except (ValueError, KeyError, ZeroDivisionError) as e: print(f"Warning: Skipping row {row_num} in '{filename}': {e}. Row: {row}")
+    except FileNotFoundError: print(f"Error: CSV file '{filename}' not found.")
+    except Exception as e: print(f"Unexpected error reading '{filename}': {e}")
+    if not player_pool_list: print(f"Warning: No players loaded from '{filename}'.")
     return player_pool_list
 
+def update_roster_derived_globals():
+    global POSITION_ORDER, TOTAL_ROSTER_SPOTS, ROSTER_STRUCTURE
+    temp_position_order, current_total_spots = [], 0
+    starters = {k: v for k, v in ROSTER_STRUCTURE.items() if not k.startswith("BN_")}
+    bench = {k: v for k, v in ROSTER_STRUCTURE.items() if k.startswith("BN_")}
+    for slot_type, count in starters.items():
+        if count > 0: temp_position_order.extend([slot_type] * count); current_total_spots += count
+    for slot_type, count in bench.items():
+        if count > 0: temp_position_order.extend([slot_type] * count); current_total_spots += count
+    POSITION_ORDER, TOTAL_ROSTER_SPOTS = temp_position_order, current_total_spots
+    print(f"Roster derived globals updated. Total Spots: {TOTAL_ROSTER_SPOTS}, Order: {len(POSITION_ORDER)} slots")
+    unique_initial_positions = set(p[2] for p in INITIAL_PLAYER_POOL_DATA)
+    for slot_key, count in ROSTER_STRUCTURE.items():
+        if count > 0 and slot_key not in FLEX_ELIGIBILITY and slot_key not in unique_initial_positions:
+            print(f"Warning (Roster Update): Slot '{slot_key}' used but not base pos or FLEX.")
+    for flex_key, eligible_list in FLEX_ELIGIBILITY.items():
+        if ROSTER_STRUCTURE.get(flex_key, 0) > 0:
+            for pos_flex in eligible_list:
+                if pos_flex not in unique_initial_positions:
+                    print(f"Warning (Roster Update): Pos '{pos_flex}' for active FLEX '{flex_key}' not in player data.")
+
 def initial_setup(csv_filename=DEFAULT_CSV_FILENAME):
-    global INITIAL_PLAYER_POOL_DATA, MASTER_PLAYER_ID_TO_DATA, POSITION_ORDER, TOTAL_ROSTER_SPOTS
+    global INITIAL_PLAYER_POOL_DATA, MASTER_PLAYER_ID_TO_DATA
     if GAMES_IN_SEASON <= 0: print("Critical Error: GAMES_IN_SEASON positive. Exiting."); exit()
     if PICKS_PER_ROUND <= 0: print("Critical Error: PICKS_PER_ROUND must be positive. Exiting."); exit()
     INITIAL_PLAYER_POOL_DATA = load_player_pool_from_csv(csv_filename)
     if not INITIAL_PLAYER_POOL_DATA: print("Critical Error: Initial player pool is empty. Exiting."); exit()
     MASTER_PLAYER_ID_TO_DATA = {p[0]: p for p in INITIAL_PLAYER_POOL_DATA}
-    temp_position_order = []
-    starters = {k: v for k,v in ROSTER_STRUCTURE.items() if not k.startswith("BN_")}
-    bench = {k: v for k,v in ROSTER_STRUCTURE.items() if k.startswith("BN_")}
-    for slot,count in starters.items(): temp_position_order.extend([slot]*count)
-    for slot,count in bench.items(): temp_position_order.extend([slot]*count)
-    POSITION_ORDER = temp_position_order
-    TOTAL_ROSTER_SPOTS = len(POSITION_ORDER)
-    if TOTAL_ROSTER_SPOTS == 0: print("Critical Error: ROSTER_STRUCTURE is empty. Exiting."); exit()
-    unique_initial_positions = set(p[2] for p in INITIAL_PLAYER_POOL_DATA)
-    all_roster_keys = set(ROSTER_STRUCTURE.keys())
-    for slot_key in all_roster_keys:
-        if slot_key not in FLEX_ELIGIBILITY and slot_key not in unique_initial_positions:
-            print(f"Warning: Roster slot key '{slot_key}' not base or FLEX type.")
-    for flex_key, eligible_list in FLEX_ELIGIBILITY.items():
-        for pos_flex in eligible_list:
-            if pos_flex not in unique_initial_positions:
-                 print(f"Warning: Position '{pos_flex}' in FLEX_ELIGIBILITY for '{flex_key}' not in player data.")
-    print("Initial data loaded with generic ADP rounds.")
+    update_roster_derived_globals()
+    print("Initial data loaded and default roster structure processed.")
 
 def prepare_for_ga_run():
     global CURRENT_AVAILABLE_PLAYER_POOL_FOR_GA, CURRENT_PLAYERS_BY_POSITION_FOR_GA, USER_PLAYER_SLOT_ASSIGNMENTS
@@ -428,7 +423,6 @@ def genetic_algorithm_adp_lineup(curr_round):
     num_s_user = sum(1 for si in USER_PLAYER_SLOT_ASSIGNMENTS.values() if not POSITION_ORDER[si].startswith("BN_"))
     if open_ga_slots <= 0: ui_messages.append(dbc.Alert("Roster full.", color="info"))
     elif num_s_user >= num_s_defined and open_ga_slots > 0: ui_messages.append(dbc.Alert("Starters filled. GA optimizing bench.", color="info"))
-
     if open_ga_slots <= 0 or (not CURRENT_AVAILABLE_PLAYER_POOL_FOR_GA and open_ga_slots > 0) or \
        not (pop := create_initial_population()) or not all(ind and len(ind) == TOTAL_ROSTER_SPOTS for ind in pop):
         if open_ga_slots > 0 and not CURRENT_AVAILABLE_PLAYER_POOL_FOR_GA: ui_messages.append(dbc.Alert("No GA: No available players.", color="warning"))
@@ -438,7 +432,6 @@ def genetic_algorithm_adp_lineup(curr_round):
         ppg_disp = f"{ppg:.2f}" if fit > -PENALTY_VIOLATION*70 else "N/A"
         ui_messages.append(dbc.Alert(f"Current Team: Fit {fit:.2f}, PPG {ppg_disp}", color="primary" if open_ga_slots <=0 else "info"))
         return ids, fit, ui_messages
-    
     population = pop
     best_ids, (best_fit, _, _, _) = population[0], calculate_fitness(population[0], curr_round)
     for gen in range(N_GENERATIONS):
@@ -451,11 +444,9 @@ def genetic_algorithm_adp_lineup(curr_round):
         next_pop.extend([e[0] for i, e in enumerate(elites) if i < max(1, int(0.05*POPULATION_SIZE)) and (not next_pop or not any(Counter(ex)==Counter(e[0]) for ex in next_pop))])
         while len(next_pop) < POPULATION_SIZE:
             p1, p2 = tournament_selection(population, fit_scores), tournament_selection(population, fit_scores)
-            c1, c2 = crossover(p1, p2)
-            next_pop.append(mutate(c1))
+            c1, c2 = crossover(p1, p2); next_pop.append(mutate(c1))
             if len(next_pop) < POPULATION_SIZE: next_pop.append(mutate(c2))
         population = next_pop[:POPULATION_SIZE]
-
     ui_messages.append(dbc.Alert("--- GA Finished ---", color="success"))
     if best_ids and best_fit > -PENALTY_VIOLATION*70:
         final_fit, final_ppg, _, _ = calculate_fitness(best_ids, curr_round)
@@ -490,6 +481,24 @@ else:
         items.append(dbc.ListGroupItem(f"Starter PPGs x{STARTER_PPG_MULTIPLIER} in fitness.", color="info"))
         return dbc.ListGroup(items, className="mb-3")
 
+    def create_roster_input_rows(current_roster_config):
+        rows = []
+        # Ensure a consistent order of keys for creating inputs
+        # Use the keys from the initial global ROSTER_STRUCTURE definition
+        # or a predefined list if ROSTER_STRUCTURE can change its keys (which it doesn't currently)
+        defined_roster_keys = list(ROSTER_STRUCTURE.keys())
+
+        for pos_key in defined_roster_keys:
+            rows.append(
+                dbc.Row([
+                    dbc.Col(dbc.Label(pos_key, html_for=f"roster-input-{pos_key.replace('/', '-')}", className="text-end"), width=5),
+                    dbc.Col(dbc.Input(id=f"roster-input-{pos_key.replace('/', '-')}", type="number",
+                                      value=current_roster_config.get(pos_key, 0),
+                                      min=0, step=1, size="sm"), width=7)
+                ], className="mb-2 align-items-center")
+            )
+        return rows
+
     def format_team_display_data():
         prepare_for_ga_run()
         headers = [{"id": "slot", "name": "Slot"}, {"id": "pos", "name": "Pos"},
@@ -503,7 +512,7 @@ else:
             pid_in_slot = next((pid for pid, s_idx in USER_PLAYER_SLOT_ASSIGNMENTS.items() if s_idx == i), None)
             p_data = get_player_data(pid_in_slot)
             if p_data:
-                row_data = {"slot": i, "pos": slot_type, "player": f"{p_data[1]} ({p_data[2]})",
+                row_data = {"slot": i, "pos": slot_type, "player": f"{p_data[1]} ({p_data[2]})", 
                             "ppg": f"{p_data[3]:.2f}", "adp_rd": p_data[4], "bye": p_data[5] if p_data[5] > 0 else "-"}
                 if is_starter: starters_d.append(row_data); starters_ppg_sum += p_data[3]; num_s +=1
                 else: bench_d.append(row_data); num_b +=1
@@ -549,16 +558,25 @@ else:
         dcc.Store(id='ui-update-trigger', data=0),
         dbc.Modal(
             [dbc.ModalHeader(dbc.ModalTitle("Confirm Restart Draft")),
-             dbc.ModalBody("Are you sure you want to restart the entire draft? All current progress will be lost."),
+             dbc.ModalBody("Are you sure you want to restart? All draft progress will be lost."),
              dbc.ModalFooter([dbc.Button("Cancel", id="restart-draft-cancel-btn", color="secondary", className="ms-auto"),
                               dbc.Button("Confirm Restart", id="restart-draft-confirm-btn", color="danger")])],
-            id="restart-draft-modal", is_open=False, centered=True
-        ),
+            id="restart-draft-modal", is_open=False, centered=True),
         dbc.Row(dbc.Col(html.H1("🏈 Live Fantasy Football Draft Assistant", className="text-center my-4"))),
         dbc.Row(dbc.Col(id='current-round-info', className="text-center mb-3 fw-bold fs-5")),
-        dbc.Row(dbc.Col(id='action-messages-div')),
+        dbc.Row(dbc.Col(id='action-messages-div')), 
+        dbc.Row(dbc.Col(id='roster-update-messages-div')),
+
         dbc.Row([
             dbc.Col([
+                dbc.Card([
+                    dbc.CardHeader(html.H5("Customize Roster Structure", className="mb-0")),
+                    dbc.CardBody(
+                        create_roster_input_rows(ROSTER_STRUCTURE) + 
+                        [dbc.Button("Apply Roster Changes", id="apply-roster-changes-btn", 
+                                    color="success", outline=True, className="w-100 mt-3")]
+                    )
+                ], className="mb-3"),
                 dbc.Card([
                     dbc.CardHeader(html.H4("Draft Actions", className="mb-0")),
                     dbc.CardBody([
@@ -575,9 +593,9 @@ else:
                     dbc.CardHeader(html.H4("Available Players", className="mb-0")),
                     dbc.CardBody([
                         dcc.Dropdown(id='available-pos-filter-dd', options=[{'label': 'All', 'value': 'ALL'}] + [{'label': p, 'value': p} for p in sorted(list(set(pl[2] for pl in INITIAL_PLAYER_POOL_DATA)))], value='ALL', clearable=False, className="mb-2"),
-                        html.Div(id='available-players-display', style={'maxHeight': '400px', 'overflowY': 'auto'})])
+                        html.Div(id='available-players-display', style={'maxHeight': '300px', 'overflowY': 'auto'})])
                 ]),
-                 dbc.Card(get_roster_structure_info(), className="mt-3", body=False)
+                 dbc.Card(id='roster-structure-summary-display', className="mt-3", body=False)
             ], md=4),
             dbc.Col([
                 dbc.Card([
@@ -592,10 +610,13 @@ else:
                     dbc.CardBody([dbc.Button('Run GA Suggestions 🚀', id='run-ga-btn', color='primary', className="mb-3 w-100"), dcc.Loading(id="loading-ga-spinner", type="default", children=[html.Div(id='ga-results-display')])])])
             ], md=5),
             dbc.Col([
-                dbc.Card([dbc.CardHeader(html.H4("Globally Drafted Players", className="mb-0")), dbc.CardBody(html.Div(id='drafted-players-display', style={'maxHeight': '85vh', 'overflowY': 'auto'}))])
+                dbc.Card([dbc.CardHeader(html.H4("Globally Drafted Players", className="mb-0")), dbc.CardBody(html.Div(id='drafted-players-display', style={'maxHeight': 'calc(85vh - 70px)', 'overflowY': 'auto'}))])
             ], md=3)
         ], className="mb-5")
     ], fluid=True)
+
+    _initial_roster_keys_for_callback_setup = list(ROSTER_STRUCTURE.keys())
+    _roster_input_states_for_callback = [State(f"roster-input-{pos_key.replace('/', '-')}", "value") for pos_key in _initial_roster_keys_for_callback_setup]
 
     @app.callback(
         [Output('action-messages-div', 'children', allow_duplicate=True), Output('ui-update-trigger', 'data', allow_duplicate=True)],
@@ -664,35 +685,74 @@ else:
         [Input('restart-draft-open-modal-btn', 'n_clicks'),
          Input('restart-draft-confirm-btn', 'n_clicks'),
          Input('restart-draft-cancel-btn', 'n_clicks')],
-        [State('restart-draft-modal', 'is_open'),
-         State('ui-update-trigger', 'data')],
+        [State('restart-draft-modal', 'is_open'), State('ui-update-trigger', 'data')],
         prevent_initial_call=True
     )
-    def manage_restart_draft_modal(open_clicks, confirm_clicks, cancel_clicks,
-                                   current_modal_is_open, current_trigger_val):
-        global GLOBALLY_DRAFTED_PLAYER_IDS, USER_DRAFTED_PLAYERS_DATA, USER_PLAYER_SLOT_ASSIGNMENTS
-        global CURRENT_AVAILABLE_PLAYER_POOL_FOR_GA, CURRENT_PLAYERS_BY_POSITION_FOR_GA
-
-        triggered_id = ctx.triggered_id
-        new_modal_state = current_modal_is_open
-        action_message = [] 
-        new_trigger_val = current_trigger_val
-
-        if triggered_id == 'restart-draft-open-modal-btn':
-            new_modal_state = True
+    def manage_restart_draft_modal(open_clicks, confirm_clicks, cancel_clicks, current_modal_is_open, current_trigger_val):
+        global GLOBALLY_DRAFTED_PLAYER_IDS, USER_DRAFTED_PLAYERS_DATA, USER_PLAYER_SLOT_ASSIGNMENTS, CURRENT_AVAILABLE_PLAYER_POOL_FOR_GA, CURRENT_PLAYERS_BY_POSITION_FOR_GA
+        triggered_id, new_modal_state, action_message, new_trigger_val = ctx.triggered_id, current_modal_is_open, [], current_trigger_val
+        if triggered_id == 'restart-draft-open-modal-btn': new_modal_state = True
         elif triggered_id == 'restart-draft-confirm-btn':
-            GLOBALLY_DRAFTED_PLAYER_IDS = set()
-            USER_DRAFTED_PLAYERS_DATA = []
-            USER_PLAYER_SLOT_ASSIGNMENTS = {}
-            CURRENT_AVAILABLE_PLAYER_POOL_FOR_GA = [] 
-            CURRENT_PLAYERS_BY_POSITION_FOR_GA = {}
+            GLOBALLY_DRAFTED_PLAYER_IDS, USER_DRAFTED_PLAYERS_DATA, USER_PLAYER_SLOT_ASSIGNMENTS = set(), [], {}
+            CURRENT_AVAILABLE_PLAYER_POOL_FOR_GA, CURRENT_PLAYERS_BY_POSITION_FOR_GA = [], {}
             action_message = dbc.Alert("Draft restarted!", color="warning", duration=4000, dismissable=True)
-            new_trigger_val = current_trigger_val + 1
-            new_modal_state = False
-        elif triggered_id == 'restart-draft-cancel-btn':
-            new_modal_state = False
-
+            new_trigger_val, new_modal_state = current_trigger_val + 1, False
+        elif triggered_id == 'restart-draft-cancel-btn': new_modal_state = False
         return new_modal_state, action_message, new_trigger_val
+
+    @app.callback(
+        [Output('roster-update-messages-div', 'children'),
+         Output('ui-update-trigger', 'data', allow_duplicate=True),
+         Output('roster-structure-summary-display', 'children', allow_duplicate=True)],
+        # Inputs:
+        Input('apply-roster-changes-btn', 'n_clicks'),
+        # States: A list combining the dynamic roster inputs and the trigger state
+        _roster_input_states_for_callback + [State('ui-update-trigger', 'data')],
+        prevent_initial_call=True
+    )
+    def handle_apply_roster_changes(n_clicks, *all_states_tuple): # Changed signature
+        global ROSTER_STRUCTURE, USER_PLAYER_SLOT_ASSIGNMENTS, CURRENT_AVAILABLE_PLAYER_POOL_FOR_GA, CURRENT_PLAYERS_BY_POSITION_FOR_GA
+        
+        # Unpack all_states_tuple
+        num_roster_inputs = len(_initial_roster_keys_for_callback_setup)
+        new_roster_counts_args = all_states_tuple[:num_roster_inputs]
+        current_trigger_val = all_states_tuple[num_roster_inputs] # Last element
+
+        # print(f"[DEBUG] handle_apply_roster_changes triggered. n_clicks: {n_clicks}") # Keep for debugging if needed
+        # print(f"[DEBUG] Received roster counts args: {new_roster_counts_args}")
+        # print(f"[DEBUG] Received current_trigger_val: {current_trigger_val}")
+
+        alerts, temp_new_roster, valid_update, total_new_spots = [], {}, True, 0
+        keys_in_order = _initial_roster_keys_for_callback_setup
+
+        # This loop should use new_roster_counts_args correctly now
+        for i, key in enumerate(keys_in_order):
+            count_val = new_roster_counts_args[i]
+            if count_val is None: count_val = 0 
+            if not isinstance(count_val, int) or count_val < 0:
+                alerts.append(dbc.Alert(f"Invalid count for {key}: '{count_val}'. Must be non-negative integer.", color="danger", duration=4000))
+                valid_update = False; break
+            temp_new_roster[key] = count_val
+            total_new_spots += count_val
+        
+        if not valid_update: 
+            return alerts, current_trigger_val, get_roster_structure_info() # Use original trigger_val on failure
+
+        if sum(temp_new_roster.values()) == 0 :
+            alerts.append(dbc.Alert("Roster cannot have zero total spots.", color="danger", duration=5000))
+            return alerts, current_trigger_val, get_roster_structure_info()
+
+        ROSTER_STRUCTURE = temp_new_roster
+        update_roster_derived_globals()
+        USER_PLAYER_SLOT_ASSIGNMENTS = {} 
+        CURRENT_AVAILABLE_PLAYER_POOL_FOR_GA, CURRENT_PLAYERS_BY_POSITION_FOR_GA = [], {}
+        
+        alerts.append(dbc.Alert("Roster structure updated! Team assignments will be re-evaluated.", color="success", duration=4000))
+        
+        new_trigger_val = current_trigger_val + 1
+        updated_roster_summary = get_roster_structure_info()
+
+        return alerts, new_trigger_val, updated_roster_summary
 
     @app.callback(
         Output('ga-results-display', 'children'), Input('run-ga-btn', 'n_clicks'), prevent_initial_call=True
@@ -713,8 +773,10 @@ else:
         [Output('my-team-starters-table', 'children'), Output('my-team-starters-summary', 'children'),
          Output('my-team-bench-table', 'children'), Output('my-team-bench-summary', 'children'),
          Output('my-team-surplus-players', 'children'), Output('current-round-info', 'children'),
-         Output('drafted-players-display', 'children'), Output('available-players-display', 'children')],
-        [Input('ui-update-trigger', 'data'), Input('available-pos-filter-dd', 'value')]
+         Output('drafted-players-display', 'children'), Output('available-players-display', 'children'),
+         Output('roster-structure-summary-display', 'children', allow_duplicate=True)],
+        [Input('ui-update-trigger', 'data'), Input('available-pos-filter-dd', 'value')],
+        prevent_initial_call=True # Changed to True as per Dash error requirement
     )
     def update_all_displays(trigger_val, avail_pos_filter):
         headers, sd, spg, ns, ts, _, bd, nb, tb, surplus = format_team_display_data()
@@ -728,7 +790,7 @@ else:
         overall_picks = len(GLOBALLY_DRAFTED_PLAYER_IDS)
         curr_overall_rd = math.floor(overall_picks / PICKS_PER_ROUND) + 1 if PICKS_PER_ROUND > 0 else 1
         round_info_txt = f"Draft: Rd {curr_overall_rd} (Overall Pick {overall_picks + 1})"
-        drafted_disp = []
+        drafted_disp, avail_disp = [], []
         if not GLOBALLY_DRAFTED_PLAYER_IDS: drafted_disp.append(html.P("None yet.", className="text-muted"))
         else:
             drafted_sorted = sorted([(get_player_data(pid), pid in [p[0] for p in USER_DRAFTED_PLAYERS_DATA])
@@ -750,7 +812,8 @@ else:
             if count >= limit: break
         if not avail_items: avail_items.append(dbc.ListGroupItem("None available.", className="text-muted"))
         avail_disp = dbc.ListGroup(avail_items, flush=True)
-        return starters_tbl, f"Starters ({ns}/{ts}) PPG: {spg:.2f}", bench_tbl, f"Bench ({nb}/{tb})", surplus_disp, round_info_txt, drafted_disp, avail_disp
+        roster_summary_children = get_roster_structure_info()
+        return starters_tbl, f"Starters ({ns}/{ts}) PPG: {spg:.2f}", bench_tbl, f"Bench ({nb}/{tb})", surplus_disp, round_info_txt, drafted_disp, avail_disp, roster_summary_children
 
     # --- Run the App ---
     if __name__ == '__main__':
