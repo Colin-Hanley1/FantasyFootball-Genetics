@@ -429,6 +429,7 @@ except SystemExit: INITIAL_SETUP_SUCCESS = False
 
 DBC_THEME = dbc.themes.FLATLY
 app = dash.Dash(__name__, external_stylesheets=[DBC_THEME], suppress_callback_exceptions=True)
+server = app.server
 
 if not INITIAL_SETUP_SUCCESS:
     app.layout = dbc.Container([dbc.Alert("App Init Failed.", color="danger", className="mt-5")], fluid=True)
@@ -678,7 +679,6 @@ else:
     if __name__ == '__main__':
         if INITIAL_SETUP_SUCCESS:
             app.run(debug=True)
-            server = app.server
         else:
             print("Dash application cannot start due to initialization errors. See console.")
             if 'app' in locals() and app: app.run(debug=True)
