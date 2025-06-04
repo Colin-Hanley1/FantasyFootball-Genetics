@@ -462,7 +462,7 @@ else:
                 if is_starter: starters_d.append(row_data); starters_ppg_sum += p_data[3]; num_s +=1
                 else: bench_d.append(row_data); num_b +=1
             else:
-                row_data = {"slot": i, "pos": slot_type, "player": "<EMPTY SLOT>", "ppg": "-", "adp_rd": "-", "bye": "-"}
+                row_data = {"slot": i, "pos": slot_type, "player": "-", "ppg": "-", "adp_rd": "-", "bye": "-"}
                 if is_starter: starters_d.append(row_data)
                 else: bench_d.append(row_data)
         
@@ -491,8 +491,8 @@ else:
                 slot_type_disp = get_slot_type_for_index(i)
                 user_pick_str = " (Your Pick)" if pid_slot in USER_PLAYER_SLOT_ASSIGNMENTS and USER_PLAYER_SLOT_ASSIGNMENTS.get(pid_slot) == i else ""
                 txt = ""
-                if p_data: txt = f"S{i:02d}({slot_type_disp:<10}): {p_data[1]:<20}({p_data[2]:<2}) PPG:{p_data[3]:>5.2f} Rd:{p_data[4]:>2} Bye:{p_data[5] if p_data[5] > 0 else '-'}{user_pick_str}"
-                elif pid_slot == -99: txt = f"S{i:02d}({slot_type_disp:<10}): <EMPTY SLOT>"
+                if p_data: txt = f"S{i:02d}({slot_type_disp:<10}): {p_data[1]:<20}({p_data[2]:<2}) PPG:{p_data[3]:>5.2f} Bye:{p_data[5] if p_data[5] > 0 else '-'} Rd:{p_data[4]:>2} {user_pick_str}"
+                elif pid_slot == -99: txt = f"S{i:02d}({slot_type_disp:<10}): -"
                 else: txt = f"S{i:02d}({slot_type_disp:<10}): Invalid ID {pid_slot}"
                 items.append(dbc.ListGroupItem(txt, style={'fontSize': '0.8rem', 'padding': '0.25rem 0.5rem'}))
             lineup_details.append(dbc.ListGroup(items, flush=True, className="mt-2"))
