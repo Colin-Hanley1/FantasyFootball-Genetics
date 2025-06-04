@@ -22,7 +22,7 @@ FLEX_ELIGIBILITY = {
     "SUPERFLEX": ("QB", "WR", "RB", "TE"), "BN_SUPERFLEX": ("QB", "WR", "RB", "TE"),
     "BN_FLX": ("WR", "RB", "TE")
 }
-ROSTER_STRUCTURE = { # This is the initial default, can be changed by UI
+ROSTER_STRUCTURE = {
     "QB": 1, "RB": 2, "WR": 2, "TE": 1, "W/R/T": 1,
     "BN_SUPERFLEX": 1, "BN_FLX": 4
 }
@@ -37,10 +37,11 @@ CURRENT_PLAYERS_BY_POSITION_FOR_GA = {}
 USER_PLAYER_SLOT_ASSIGNMENTS = {}
 POSITION_ORDER = []
 TOTAL_ROSTER_SPOTS = 0
+CURRENT_SCORING_MODE = "PPR"
 
 # --- GA Parameters ---
 POPULATION_SIZE = 100
-N_GENERATIONS = 500
+N_GENERATIONS = 100
 MUTATION_RATE = 0.20
 CROSSOVER_RATE = 0.8
 TOURNAMENT_SIZE = 5
@@ -50,11 +51,12 @@ BENCH_ADP_PENALTY_SCALER = 0.3
 STARTER_ADP_WEAKNESS_THRESHOLD = 2
 EARLY_ROUND_ADP_BENCH_PENALTY = 0.5
 BYE_WEEK_CONFLICT_PENALTY_FACTOR = 0.001
+BACKUP_POSITION_PENALTY_SCALER = 0.4
 
 # --- Data Loading and Setup ---
 def load_player_pool_from_csv(filename=DEFAULT_CSV_FILENAME):
     player_pool_list = []
-    expected_headers = ["ID", "Name", "Position", "TotalPoints", "ADP", "ByeWeek"]
+    expected_headers = ["ID", "Name", "Position", "PPRPoints", "PPRADP", "STDPoints", "STDADP", "ByeWeek"]
     try:
         with open(filename, mode='r', newline='', encoding='utf-8') as csvfile:
             reader = csv.DictReader(csvfile)
@@ -64,19 +66,54 @@ def load_player_pool_from_csv(filename=DEFAULT_CSV_FILENAME):
                 return []
             for row_num, row in enumerate(reader, 1):
                 try:
-                    player_id, name_in_csv, pos_from_col = int(row["ID"]), row["Name"], row["Position"].upper()
-                    total_points, adp_raw = float(row["TotalPoints"]), int(row["ADP"])
-                    try:
-                        bye_week = int(row["ByeWeek"]) if row["ByeWeek"] and row["ByeWeek"].strip() else 0
+                    player_id = int(row["ID"])
+                    name_in_csv = row["Name"]
+                    pos_from_col = row["Position"].upper()
+                    ppr_points_raw = float(row["PPRPoints"])
+                    std_points_raw = float(row["STDPoints"])
+                    try: ppr_adp_raw = int(float(row["PPRADP"]))
+                    except ValueError: ppr_adp_raw = 999 ; print(f"Warning: Row {row_num}, Player ID {player_id}: Invalid PPRADP '{row['PPRADP']}', using {ppr_adp_raw}.")
+                    try: std_adp_raw = int(float(row["STDADP"]))
+                    except ValueError: std_adp_raw = 999 ; print(f"Warning: Row {row_num}, Player ID {player_id}: Invalid STDADP '{row['STDADP']}', using {std_adp_raw}.")
+                    try: bye_week = int(row["ByeWeek"]) if row["ByeWeek"] and row["ByeWeek"].strip() else 0
                     except ValueError: bye_week = 0; print(f"Warning: Row {row_num}, Player ID {player_id}: Invalid ByeWeek '{row['ByeWeek']}', using 0.")
-                    ppg = total_points / GAMES_IN_SEASON if GAMES_IN_SEASON > 0 else 0
-                    calculated_round = max(1, math.ceil(adp_raw / PICKS_PER_ROUND)) if PICKS_PER_ROUND > 0 else 1
-                    player_pool_list.append((player_id, name_in_csv, pos_from_col, ppg, calculated_round, bye_week))
-                except (ValueError, KeyError, ZeroDivisionError) as e: print(f"Warning: Skipping row {row_num} in '{filename}': {e}. Row: {row}")
-    except FileNotFoundError: print(f"Error: CSV file '{filename}' not found.")
-    except Exception as e: print(f"Unexpected error reading '{filename}': {e}")
+                    
+                    active_points_val = ppr_points_raw if CURRENT_SCORING_MODE == "PPR" else std_points_raw
+                    active_adp_val = ppr_adp_raw if CURRENT_SCORING_MODE == "PPR" else std_adp_raw
+                    current_ppg = active_points_val / GAMES_IN_SEASON if GAMES_IN_SEASON > 0 else 0
+                    current_calculated_round = max(1, math.ceil(active_adp_val / PICKS_PER_ROUND)) if PICKS_PER_ROUND > 0 else 1
+                    
+                    player_pool_list.append((player_id, name_in_csv, pos_from_col, current_ppg, current_calculated_round, bye_week, ppr_points_raw, ppr_adp_raw, std_points_raw, std_adp_raw))
+                except (KeyError, ValueError, ZeroDivisionError) as e: print(f"Warning: Skipping row {row_num} in '{filename}': {e}. Row: {row}")
+    except FileNotFoundError: print(f"Error: CSV file '{filename}' not found."); return []
+    except Exception as e: print(f"Unexpected error reading '{filename}': {e}"); return []
     if not player_pool_list: print(f"Warning: No players loaded from '{filename}'.")
     return player_pool_list
+
+def update_player_data_for_scoring_mode(selected_mode):
+    global INITIAL_PLAYER_POOL_DATA, MASTER_PLAYER_ID_TO_DATA, USER_DRAFTED_PLAYERS_DATA, CURRENT_SCORING_MODE
+    if not INITIAL_PLAYER_POOL_DATA: return
+    CURRENT_SCORING_MODE = selected_mode
+    new_initial_pool = []
+    for p_tuple_full in INITIAL_PLAYER_POOL_DATA:
+        pid, name, pos, _, _, bye, ppr_pts, ppr_adp, std_pts, std_adp = p_tuple_full[:10]
+        active_points_val = ppr_pts if selected_mode == "PPR" else std_pts
+        active_adp_val = ppr_adp if selected_mode == "PPR" else std_adp
+        current_ppg_new = active_points_val / GAMES_IN_SEASON if GAMES_IN_SEASON > 0 else 0
+        current_calc_round_new = max(1, math.ceil(active_adp_val / PICKS_PER_ROUND)) if PICKS_PER_ROUND > 0 else 1
+        new_initial_pool.append((pid, name, pos, current_ppg_new, current_calc_round_new, bye, ppr_pts, ppr_adp, std_pts, std_adp))
+    INITIAL_PLAYER_POOL_DATA = new_initial_pool
+    MASTER_PLAYER_ID_TO_DATA = {p[0]: p for p in INITIAL_PLAYER_POOL_DATA}
+    new_user_drafted_players = []
+    for user_p_tuple in USER_DRAFTED_PLAYERS_DATA:
+        pid, name, pos, _, _, bye, ppr_pts, ppr_adp, std_pts, std_adp = user_p_tuple[:10]
+        active_points_val = ppr_pts if selected_mode == "PPR" else std_pts
+        active_adp_val = ppr_adp if selected_mode == "PPR" else std_adp
+        current_ppg_new = active_points_val / GAMES_IN_SEASON if GAMES_IN_SEASON > 0 else 0
+        current_calc_round_new = max(1, math.ceil(active_adp_val / PICKS_PER_ROUND)) if PICKS_PER_ROUND > 0 else 1
+        new_user_drafted_players.append((pid, name, pos, current_ppg_new, current_calc_round_new, bye, ppr_pts, ppr_adp, std_pts, std_adp))
+    USER_DRAFTED_PLAYERS_DATA = new_user_drafted_players
+    print(f"Player data updated for {selected_mode} scoring mode.")
 
 def update_roster_derived_globals():
     global POSITION_ORDER, TOTAL_ROSTER_SPOTS, ROSTER_STRUCTURE
@@ -89,25 +126,26 @@ def update_roster_derived_globals():
         if count > 0: temp_position_order.extend([slot_type] * count); current_total_spots += count
     POSITION_ORDER, TOTAL_ROSTER_SPOTS = temp_position_order, current_total_spots
     print(f"Roster derived globals updated. Total Spots: {TOTAL_ROSTER_SPOTS}, Order: {len(POSITION_ORDER)} slots")
-    unique_initial_positions = set(p[2] for p in INITIAL_PLAYER_POOL_DATA)
-    for slot_key, count in ROSTER_STRUCTURE.items():
-        if count > 0 and slot_key not in FLEX_ELIGIBILITY and slot_key not in unique_initial_positions:
-            print(f"Warning (Roster Update): Slot '{slot_key}' used but not base pos or FLEX.")
-    for flex_key, eligible_list in FLEX_ELIGIBILITY.items():
-        if ROSTER_STRUCTURE.get(flex_key, 0) > 0:
-            for pos_flex in eligible_list:
-                if pos_flex not in unique_initial_positions:
-                    print(f"Warning (Roster Update): Pos '{pos_flex}' for active FLEX '{flex_key}' not in player data.")
+    if INITIAL_PLAYER_POOL_DATA:
+        unique_initial_positions = set(p[2] for p in INITIAL_PLAYER_POOL_DATA)
+        for slot_key, count in ROSTER_STRUCTURE.items():
+            if count > 0 and slot_key not in FLEX_ELIGIBILITY and slot_key not in unique_initial_positions:
+                print(f"Warning (Roster Update): Slot '{slot_key}' used but not base pos or FLEX.")
+        for flex_key, eligible_list in FLEX_ELIGIBILITY.items():
+            if ROSTER_STRUCTURE.get(flex_key, 0) > 0:
+                for pos_flex in eligible_list:
+                    if pos_flex not in unique_initial_positions:
+                        print(f"Warning (Roster Update): Pos '{pos_flex}' for active FLEX '{flex_key}' not in player data.")
 
 def initial_setup(csv_filename=DEFAULT_CSV_FILENAME):
-    global INITIAL_PLAYER_POOL_DATA, MASTER_PLAYER_ID_TO_DATA
+    global INITIAL_PLAYER_POOL_DATA, MASTER_PLAYER_ID_TO_DATA, CURRENT_SCORING_MODE
     if GAMES_IN_SEASON <= 0: print("Critical Error: GAMES_IN_SEASON positive. Exiting."); exit()
     if PICKS_PER_ROUND <= 0: print("Critical Error: PICKS_PER_ROUND must be positive. Exiting."); exit()
     INITIAL_PLAYER_POOL_DATA = load_player_pool_from_csv(csv_filename)
     if not INITIAL_PLAYER_POOL_DATA: print("Critical Error: Initial player pool is empty. Exiting."); exit()
-    MASTER_PLAYER_ID_TO_DATA = {p[0]: p for p in INITIAL_PLAYER_POOL_DATA}
+    update_player_data_for_scoring_mode(CURRENT_SCORING_MODE) 
     update_roster_derived_globals()
-    print("Initial data loaded and default roster structure processed.")
+    print(f"Initial data loaded. Default scoring mode: {CURRENT_SCORING_MODE}.")
 
 def prepare_for_ga_run():
     global CURRENT_AVAILABLE_PLAYER_POOL_FOR_GA, CURRENT_PLAYERS_BY_POSITION_FOR_GA, USER_PLAYER_SLOT_ASSIGNMENTS
@@ -121,7 +159,7 @@ def prepare_for_ga_run():
     sorted_user_players = sorted(USER_DRAFTED_PLAYERS_DATA, key=lambda x: x[4])
     processed_player_ids_for_assignment = set()
     for player_data_tuple in sorted_user_players:
-        player_id, _, actual_player_pos, _, _, _ = player_data_tuple
+        player_id, _, actual_player_pos, _, _, _, _, _, _, _ = player_data_tuple
         if player_id in processed_player_ids_for_assignment: continue
         assigned_this_player = False
         for slot_idx in sorted(list(available_slots_indices)):
@@ -165,69 +203,82 @@ def get_eligible_players_for_slot_type_for_ga(slot_type_value):
             if player[0] not in processed_ids: eligible_players.append(player); processed_ids.add(player[0])
     return eligible_players
 
-def parse_csv_formatted_name(csv_formatted_name):
+def normalize_name_for_search(name_str):
+    if not name_str: return ""
+    cleaned_name = name_str.lower().replace('.', '').replace("'", "").strip()
+    words = cleaned_name.split()
+    if not words: return ""
+    if len(words) == 1: return words[0]
+    return words[0][0] + "".join(words[1:])
+
+def parse_csv_name_to_fi_ln(csv_formatted_name):
     try:
-        parts = csv_formatted_name.split('_', 1)
-        pos_guess, name_part = ("", csv_formatted_name) if len(parts) != 2 else (parts[0], parts[1])
-        if not name_part: return pos_guess.lower() if pos_guess else None, "", ""
+        name_part = csv_formatted_name.split('_', 1)[-1] 
+        if not name_part: return "", ""
         first_initials, last_name = "", ""
         i = 0
         while i < len(name_part) and name_part[i].isupper(): i += 1
         first_initials = name_part[:i]
         last_name = name_part[i:]
         if len(first_initials) > 2 and not last_name: last_name, first_initials = first_initials, ""
-        return pos_guess.lower() if pos_guess else None, first_initials.lower(), last_name.lower()
-    except Exception: return None, "", ""
+        return first_initials.lower(), last_name.lower()
+    except Exception: return "", ""
 
 def find_player_flexible(query_str):
-    normalized_query = query_str.lower().replace('.', '').strip()
-    query_words = normalized_query.split()
+    user_query_normalized_filn = normalize_name_for_search(query_str)
+    user_query_simple_lower = query_str.lower().replace('.', '').replace("'", "").strip()
     POSSIBLE_QUERY_POSITIONS = {"qb", "wr", "rb", "te", "k", "def", "dst"}
-    query_pos_part, name_only_query_words = None, []
-    for word in query_words:
+    query_pos_part = None
+    name_only_query_words_for_ln_match = [] # For lastname matching specifically
+    
+    temp_query_words = user_query_simple_lower.split()
+    for word in temp_query_words:
         if word in POSSIBLE_QUERY_POSITIONS: query_pos_part = word
-        else: name_only_query_words.append(word)
-    name_only_query = " ".join(name_only_query_words)
-    potential_query_lastname = name_only_query_words[-1] if name_only_query_words else None
-    exact_csv_matches, strong_matches, partial_matches = [], [], []
+        else: name_only_query_words_for_ln_match.append(word)
+    potential_query_lastname_norm = normalize_name_for_search(" ".join(name_only_query_words_for_ln_match[-1:])) if name_only_query_words_for_ln_match else ""
+
+
+    exact_csv_matches, filn_format_matches, lastname_matches, strong_partial_matches, partial_matches = [], [], [], [], []
+
     for p_data in INITIAL_PLAYER_POOL_DATA:
-        pid, csv_name, csv_pos_col, _, _, _ = p_data
+        pid, csv_name, csv_pos_col, _, _, _, _, _, _, _ = p_data
         csv_name_lower, csv_pos_col_lower = csv_name.lower(), csv_pos_col.lower()
-        if normalized_query == csv_name_lower: exact_csv_matches.append(p_data); continue
-        _, parsed_fi, parsed_ln = parse_csv_formatted_name(csv_name)
-        if not parsed_ln and not parsed_fi and csv_name_lower: parsed_ln = csv_name_lower.split('_',1)[-1]
-        if potential_query_lastname and parsed_ln and potential_query_lastname == parsed_ln:
-            if query_pos_part and query_pos_part == csv_pos_col_lower: strong_matches.append(p_data)
-            elif not query_pos_part: strong_matches.append(p_data)
+
+        if user_query_simple_lower == csv_name_lower: exact_csv_matches.append(p_data); continue
+        
+        fi_csv, ln_csv = parse_csv_name_to_fi_ln(csv_name)
+        csv_name_normalized_filn = fi_csv + ln_csv
+
+        if user_query_normalized_filn == csv_name_normalized_filn:
+            if query_pos_part and query_pos_part == csv_pos_col_lower: filn_format_matches.insert(0,p_data)
+            elif not query_pos_part: filn_format_matches.append(p_data)
             else: partial_matches.append(p_data)
             continue
-        if len(name_only_query_words) == 2 and parsed_fi and parsed_ln and \
-           name_only_query_words[0] == parsed_fi and name_only_query_words[1] == parsed_ln:
-            if query_pos_part and query_pos_part == csv_pos_col_lower: strong_matches.append(p_data)
-            elif not query_pos_part: strong_matches.append(p_data)
+            
+        if ln_csv and user_query_normalized_filn == ln_csv: # User query was single word, normalized, matches ln_csv
+            if query_pos_part and query_pos_part == csv_pos_col_lower: lastname_matches.insert(0,p_data)
+            elif not query_pos_part: lastname_matches.append(p_data)
             else: partial_matches.append(p_data)
             continue
-        if len(name_only_query_words) == 1 and parsed_fi and parsed_ln and \
-           name_only_query_words[0] == (parsed_fi + parsed_ln):
-            if query_pos_part and query_pos_part == csv_pos_col_lower: strong_matches.append(p_data)
-            elif not query_pos_part: strong_matches.append(p_data)
-            else: partial_matches.append(p_data)
-            continue
-        if potential_query_lastname and parsed_ln and len(potential_query_lastname) >= 3 and parsed_ln.startswith(potential_query_lastname):
-            if query_pos_part and query_pos_part == csv_pos_col_lower: strong_matches.append(p_data)
+            
+        if ln_csv and potential_query_lastname_norm and len(potential_query_lastname_norm) >= 3 and ln_csv.startswith(potential_query_lastname_norm):
+            if query_pos_part and query_pos_part == csv_pos_col_lower: strong_partial_matches.append(p_data)
             elif not query_pos_part: partial_matches.append(p_data)
             continue
-        if name_only_query and parsed_ln and all(qw in parsed_ln for qw in name_only_query_words if len(qw)>1):
-             if query_pos_part and query_pos_part == csv_pos_col_lower: strong_matches.append(p_data)
-             else: partial_matches.append(p_data)
-             continue
+
+        csv_name_part_after_underscore = csv_name_lower.split('_',1)[-1]
+        if len(user_query_simple_lower) >= 3 and user_query_simple_lower in csv_name_part_after_underscore:
+            partial_matches.append(p_data)
+            continue
+            
     final_results, seen_ids = [], set()
-    for p_list in [exact_csv_matches, strong_matches, partial_matches]:
+    for p_list in [exact_csv_matches, filn_format_matches, lastname_matches, strong_partial_matches, partial_matches]:
         for p_item in p_list:
             if p_item[0] not in seen_ids: final_results.append(p_item); seen_ids.add(p_item[0])
     return final_results
 
-def create_individual():
+# --- GA Core Functions (create_individual, calculate_fitness, repair_lineup, etc. - Unchanged) ---
+def create_individual(): # Unchanged
     individual_ids, used_player_ids = [None] * TOTAL_ROSTER_SPOTS, set()
     for pid, slot_idx in USER_PLAYER_SLOT_ASSIGNMENTS.items():
         if 0 <= slot_idx < TOTAL_ROSTER_SPOTS: individual_ids[slot_idx] = pid; used_player_ids.add(pid)
@@ -241,10 +292,8 @@ def create_individual():
         if individual_ids[i] is None and not any(s_idx == i for s_idx in USER_PLAYER_SLOT_ASSIGNMENTS.values()):
             individual_ids[i] = -99
     return individual_ids
-
-def create_initial_population(): return [create_individual() for _ in range(POPULATION_SIZE)]
-
-def calculate_fitness(individual_ids, curr_round):
+def create_initial_population(): return [create_individual() for _ in range(POPULATION_SIZE)] # Unchanged
+def calculate_fitness(individual_ids, curr_round): # Unchanged
     if not individual_ids or len(individual_ids) != TOTAL_ROSTER_SPOTS: return -float('inf'), 0, set(), []
     if any(pid is None or (not isinstance(pid, int)) or (pid <= 0 and pid != -99) for pid in individual_ids):
         inv_spots = sum(1 for pid in individual_ids if pid != -99 and (pid is None or not isinstance(pid, int) or pid <= 0))
@@ -272,8 +321,7 @@ def calculate_fitness(individual_ids, curr_round):
     raw_ppg_sum, fitness_ppg_component = 0, 0
     for i, p_data_calc in enumerate(lineup_player_objects):
         if p_data_calc is None: continue
-        ppg = p_data_calc[3]
-        raw_ppg_sum += ppg
+        ppg = p_data_calc[3]; raw_ppg_sum += ppg
         fitness_ppg_component += (ppg * STARTER_PPG_MULTIPLIER) if not POSITION_ORDER[i].startswith("BN_") else ppg
     fitness_score = fitness_ppg_component
     bench_adp_mismanagement_penalty = 0
@@ -297,15 +345,26 @@ def calculate_fitness(individual_ids, curr_round):
     num_bye_week_conflicts = sum(count - 1 for count in bye_week_counts.values() if count >= 2)
     if num_bye_week_conflicts > 0:
         fitness_score -= (PENALTY_VIOLATION * BYE_WEEK_CONFLICT_PENALTY_FACTOR * num_bye_week_conflicts)
+    missing_backup_penalty_points = 0
+    core_starter_positions_defined = set()
+    for slot, count in ROSTER_STRUCTURE.items():
+        if count > 0 and not slot.startswith("BN_") and slot not in FLEX_ELIGIBILITY: core_starter_positions_defined.add(slot)
+    if core_starter_positions_defined:
+        bench_player_actual_positions = Counter()
+        for i, p_data in enumerate(lineup_player_objects):
+            if p_data is not None and POSITION_ORDER[i].startswith("BN_"): bench_player_actual_positions[p_data[2]] += 1
+        for core_pos in core_starter_positions_defined:
+            is_core_pos_started = any(p_obj and not POSITION_ORDER[i].startswith("BN_") and POSITION_ORDER[i] == core_pos and p_obj[2] == core_pos for i, p_obj in enumerate(lineup_player_objects))
+            if is_core_pos_started and bench_player_actual_positions[core_pos] == 0: missing_backup_penalty_points += 1
+        if missing_backup_penalty_points > 0: fitness_score -= (PENALTY_VIOLATION * BACKUP_POSITION_PENALTY_SCALER * missing_backup_penalty_points)
     player_adp_rounds_in_lineup = [p[4] for p in valid_player_data_for_checks]
     adp_round_counts = Counter(player_adp_rounds_in_lineup)
     num_future_round_stacking_violations = sum(count - 1 for adp_r, count in adp_round_counts.items() if count > 1 and adp_r >= curr_round)
     if num_future_round_stacking_violations > 0:
         fitness_score -= (PENALTY_VIOLATION * num_future_round_stacking_violations * 1.5)
     return fitness_score, raw_ppg_sum, set(player_adp_rounds_in_lineup), valid_player_data_for_checks
-
-def repair_lineup(lineup_ids_to_repair):
-    repaired_ids = list(lineup_ids_to_repair)
+def repair_lineup(lineup_ids_to_repair): # Unchanged
+    repaired_ids = list(lineup_ids_to_repair); # ... (rest of function as provided previously) ...
     if not repaired_ids or len(repaired_ids) != TOTAL_ROSTER_SPOTS: return create_individual()
     user_assigned_slots = set(USER_PLAYER_SLOT_ASSIGNMENTS.values())
     for pid, slot_idx in USER_PLAYER_SLOT_ASSIGNMENTS.items():
@@ -346,8 +405,7 @@ def repair_lineup(lineup_ids_to_repair):
     for i in ga_slots_to_repair:
         if repaired_ids[i] is None: repaired_ids[i] = -99
     return repaired_ids
-
-def tournament_selection(population, fitness_scores_only):
+def tournament_selection(population, fitness_scores_only): # Unchanged
     if not population: return create_individual()
     actual_tourn_size = min(TOURNAMENT_SIZE, len(population))
     if actual_tourn_size <= 0: return random.choice(population) if population else create_individual()
@@ -355,8 +413,7 @@ def tournament_selection(population, fitness_scores_only):
     tournament_contenders = [(population[i], fitness_scores_only[i]) for i in selected_indices]
     winner = max(tournament_contenders, key=lambda x: x[1])
     return winner[0]
-
-def crossover(parent1_ids, parent2_ids):
+def crossover(parent1_ids, parent2_ids): # Unchanged
     child1, child2 = list(parent1_ids), list(parent2_ids)
     if random.random() < CROSSOVER_RATE and TOTAL_ROSTER_SPOTS > 1:
         pt = random.randint(1, TOTAL_ROSTER_SPOTS - 1) if TOTAL_ROSTER_SPOTS > 1 else 0
@@ -375,8 +432,7 @@ def crossover(parent1_ids, parent2_ids):
                         temp_c2[assigned_slot_index] = player_id
             child1, child2 = temp_c1, temp_c2
     return repair_lineup(child1), repair_lineup(child2)
-
-def mutate(individual_ids):
+def mutate(individual_ids): # Unchanged
     mutated = list(individual_ids)
     user_assigned_indices = set(USER_PLAYER_SLOT_ASSIGNMENTS.values())
     if random.random() < MUTATION_RATE:
@@ -394,8 +450,7 @@ def mutate(individual_ids):
         if not options: options = eligible_pool_mut
         if options: mutated[mutation_idx] = random.choice(options)[0]
     return repair_lineup(mutated)
-
-def suggest_next_best_pick(best_ga_lineup_ids, user_drafted_player_ids_set):
+def suggest_next_best_pick(best_ga_lineup_ids, user_drafted_player_ids_set): # Unchanged
     ga_suggested_additions_details = []
     for slot_index, player_id in enumerate(best_ga_lineup_ids):
         if player_id not in user_drafted_player_ids_set and player_id > 0:
@@ -415,8 +470,7 @@ def suggest_next_best_pick(best_ga_lineup_ids, user_drafted_player_ids_set):
         bench_ga_would_add.sort(key=lambda p: (p["adp_round"], -p["ppg"]))
         return bench_ga_would_add[0]["data"]
     return None
-
-def genetic_algorithm_adp_lineup(curr_round):
+def genetic_algorithm_adp_lineup(curr_round): # Unchanged
     ui_messages, open_ga_slots = [], TOTAL_ROSTER_SPOTS - len(USER_PLAYER_SLOT_ASSIGNMENTS)
     num_s_defined = sum(1 for s in POSITION_ORDER if not s.startswith("BN_"))
     num_s_user = sum(1 for si in USER_PLAYER_SLOT_ASSIGNMENTS.values() if not POSITION_ORDER[si].startswith("BN_"))
@@ -472,30 +526,24 @@ server = app.server
 if not INITIAL_SETUP_SUCCESS:
     app.layout = dbc.Container([dbc.Alert("App Init Failed.", color="danger", className="mt-5")], fluid=True)
 else:
-    def get_roster_structure_info():
-        items = [dbc.ListGroupItem(html.H5("Roster Settings", className="mb-0"), className="bg-light")]
+    _INITIAL_ROSTER_KEYS = list(ROSTER_STRUCTURE.keys())
+    def get_roster_structure_info(): # Unchanged
+        items = [dbc.ListGroupItem(html.H5("Current Roster Settings", className="mb-0"), className="bg-light")]
         for slot, count in ROSTER_STRUCTURE.items():
             elig_str = f" (Eligible: {', '.join(FLEX_ELIGIBILITY[slot])})" if slot in FLEX_ELIGIBILITY else ""
             items.append(dbc.ListGroupItem(f"{slot}: {count}{elig_str}"))
         items.append(dbc.ListGroupItem(f"Starter PPGs x{STARTER_PPG_MULTIPLIER} in fitness.", color="info"))
+        items.append(dbc.ListGroupItem(f"Active Scoring Mode: {CURRENT_SCORING_MODE}", className="text-primary fw-bold"))
         return dbc.ListGroup(items, className="mb-3")
-
-    _INITIAL_ROSTER_KEYS = list(ROSTER_STRUCTURE.keys()) # Used for creating inputs and callback states
-
-    def create_roster_input_rows(current_roster_config):
+    def create_roster_input_rows(current_roster_config): # Unchanged
         rows = []
         for pos_key in _INITIAL_ROSTER_KEYS:
-            rows.append(
-                dbc.Row([
-                    dbc.Col(dbc.Label(pos_key, html_for=f"roster-input-{pos_key.replace('/', '-')}", className="text-end"), width=5),
-                    dbc.Col(dbc.Input(id=f"roster-input-{pos_key.replace('/', '-')}", type="number",
-                                      value=current_roster_config.get(pos_key, 0),
-                                      min=0, step=1, size="sm"), width=7)
-                ], className="mb-2 align-items-center")
-            )
+            rows.append(dbc.Row([
+                dbc.Col(dbc.Label(pos_key, html_for=f"roster-input-{pos_key.replace('/', '-')}", className="text-end"), width=5),
+                dbc.Col(dbc.Input(id=f"roster-input-{pos_key.replace('/', '-')}", type="number", value=current_roster_config.get(pos_key, 0), min=0, step=1, size="sm"), width=7)
+            ], className="mb-2 align-items-center"))
         return rows
-
-    def format_team_display_data():
+    def format_team_display_data(): # Unchanged
         prepare_for_ga_run()
         headers = [{"id": "slot", "name": "Slot"}, {"id": "pos", "name": "Pos"},
                    {"id": "player", "name": "Player (Actual Pos)"}, {"id": "ppg", "name": "PPG"},
@@ -519,8 +567,7 @@ else:
         surplus_elems = [dbc.ListGroupItem(f"{p[1]}({p[2]}) PPG:{p[3]:.2f} Rd:{p[4]} Bye:{p[5] if p[5] > 0 else '-'}")
                          for p in USER_DRAFTED_PLAYERS_DATA if p[0] not in USER_PLAYER_SLOT_ASSIGNMENTS]
         return headers, starters_d, starters_ppg_sum, num_s, total_s, headers, bench_d, num_b, total_b, surplus_elems
-
-    def format_ga_results_display(best_lineup_ids, best_fitness, ga_messages_alerts, next_pick_suggestion_data=None):
+    def format_ga_results_display(best_lineup_ids, best_fitness, ga_messages_alerts, next_pick_suggestion_data=None): # Unchanged
         children = [html.H5("GA Suggestions", className="card-title")]
         if next_pick_suggestion_data:
             p_sugg = next_pick_suggestion_data
@@ -550,7 +597,7 @@ else:
                  children.append(dbc.Alert("WARNING: DUPLICATES IN BEST LINEUP.", color="danger", className="mt-2 fw-bold"))
         return children
 
-    app.layout = dbc.Container([
+    app.layout = dbc.Container([ # Unchanged
         dcc.Store(id='ui-update-trigger', data=0),
         dbc.Modal(
             [dbc.ModalHeader(dbc.ModalTitle("Confirm Restart Draft")),
@@ -565,12 +612,14 @@ else:
         dbc.Row([
             dbc.Col([
                 dbc.Card([
+                    dbc.CardHeader(html.H5("Scoring Mode", className="mb-0")),
+                    dbc.CardBody(dcc.RadioItems(id='scoring-mode-selector',
+                                                options=[{'label': 'PPR', 'value': 'PPR'}, {'label': 'Standard', 'value': 'STD'}],
+                                                value=CURRENT_SCORING_MODE, labelStyle={'display': 'inline-block', 'marginRight': '20px'}, inputClassName="me-1"))
+                ], className="mb-3"),
+                dbc.Card([
                     dbc.CardHeader(html.H5("Customize Roster Structure", className="mb-0")),
-                    dbc.CardBody(
-                        create_roster_input_rows(ROSTER_STRUCTURE) + 
-                        [dbc.Button("Apply Roster Changes", id="apply-roster-changes-btn", 
-                                    color="success", outline=True, className="w-100 mt-3")]
-                    )
+                    dbc.CardBody(create_roster_input_rows(ROSTER_STRUCTURE) + [dbc.Button("Apply Roster Changes", id="apply-roster-changes-btn", color="success", outline=True, className="w-100 mt-3")])
                 ], className="mb-3"),
                 dbc.Card([
                     dbc.CardHeader(html.H4("Draft Actions", className="mb-0")),
@@ -605,7 +654,7 @@ else:
                     dbc.CardBody([dbc.Button('Run GA Suggestions 🚀', id='run-ga-btn', color='primary', className="mb-3 w-100"), dcc.Loading(id="loading-ga-spinner", type="default", children=[html.Div(id='ga-results-display')])])])
             ], md=5),
             dbc.Col([
-                dbc.Card([dbc.CardHeader(html.H4("Globally Drafted Players", className="mb-0")), dbc.CardBody(html.Div(id='drafted-players-display', style={'maxHeight': 'calc(85vh - 70px)', 'overflowY': 'auto'}))])
+                dbc.Card([dbc.CardHeader(html.H4("Globally Drafted Players", className="mb-0")), dbc.CardBody(html.Div(id='drafted-players-display', style={'maxHeight': 'calc(85vh - 120px)', 'overflowY': 'auto'}))])
             ], md=3)
         ], className="mb-5")
     ], fluid=True)
@@ -622,7 +671,7 @@ else:
         _roster_input_states_for_callback + [State('ui-update-trigger', 'data')],
         prevent_initial_call=True
     )
-    def handle_apply_roster_changes(n_clicks, *all_input_and_state_values):
+    def handle_apply_roster_changes(n_clicks, *all_input_and_state_values): # Unchanged
         global ROSTER_STRUCTURE, USER_PLAYER_SLOT_ASSIGNMENTS, CURRENT_AVAILABLE_PLAYER_POOL_FOR_GA, CURRENT_PLAYERS_BY_POSITION_FOR_GA
         num_roster_inputs = len(_INITIAL_ROSTER_KEYS)
         new_roster_counts_from_ui = all_input_and_state_values[:num_roster_inputs]
@@ -650,7 +699,7 @@ else:
         current_input_values = [ROSTER_STRUCTURE.get(key, 0) for key in _INITIAL_ROSTER_KEYS]
         return [alerts, current_trigger_val + 1, get_roster_structure_info()] + current_input_values
 
-    @app.callback(
+    @app.callback( # MODIFIED for clearing inputs and Enter key
         [Output('action-messages-div', 'children', allow_duplicate=True),
          Output('ui-update-trigger', 'data', allow_duplicate=True),
          Output('player-query-input', 'value', allow_duplicate=True),
@@ -667,21 +716,18 @@ else:
         triggered_prop_id = ctx.triggered[0]['prop_id']
         triggered_component_id = triggered_prop_id.split('.')[0]
         alerts, new_trigger_val = [], trigger_val
-        player_query_return_value, undo_input_return_value = query_val_state, undo_pid_state
+        player_query_return_value, undo_input_return_value = query_val_state, undo_pid_state # Default to not clearing
         active_query, action_type = "", None
 
-        if triggered_component_id == 'player-query-input' and triggered_prop_id.endswith('.n_submit'):
-            active_query, action_type = query_val_state, "draft_opponent_enter"
+        if triggered_component_id == 'player-query-input' and triggered_prop_id.endswith('.n_submit'): active_query, action_type = query_val_state, "draft_opponent_enter"
         elif triggered_component_id == 'draft-opponent-btn': active_query, action_type = query_val_state, "draft_opponent_button"
         elif triggered_component_id == 'draft-my-team-btn': active_query, action_type = query_val_state, "draft_my_team"
         elif triggered_component_id == 'undo-draft-btn': active_query, action_type = undo_pid_state, "undo"
-
+        
         if not active_query and action_type not in [None, "undo"]:
-             alerts.append(dbc.Alert("Player name/ID for drafting is empty.", color="warning", duration=3000))
-             return alerts, new_trigger_val, player_query_return_value, undo_input_return_value
+             alerts.append(dbc.Alert("Player name/ID for drafting is empty.", color="warning", duration=3000)); return alerts, new_trigger_val, player_query_return_value, undo_input_return_value
         if not active_query and action_type == "undo":
-             alerts.append(dbc.Alert("Player ID for undo is empty.", color="warning", duration=3000))
-             return alerts, new_trigger_val, player_query_return_value, undo_input_return_value
+             alerts.append(dbc.Alert("Player ID for undo is empty.", color="warning", duration=3000)); return alerts, new_trigger_val, player_query_return_value, undo_input_return_value
         
         target_pid, target_p_data = None, None
         if action_type in ["draft_opponent_enter", "draft_opponent_button", "draft_my_team"]:
@@ -707,7 +753,7 @@ else:
                     if target_pid in USER_PLAYER_SLOT_ASSIGNMENTS: del USER_PLAYER_SLOT_ASSIGNMENTS[target_pid]
                     removed_from_user = True
                 alerts.append(dbc.Alert(f"{target_p_data[1]} opponent draft." + (" Removed." if removed_from_user else ""), color="success", duration=3000))
-                new_trigger_val, player_query_return_value = trigger_val + 1, ""
+                new_trigger_val, player_query_return_value = trigger_val + 1, "" # Clear input
         elif target_pid and target_p_data and action_type == "draft_my_team":
             if any(p[0] == target_pid for p in USER_DRAFTED_PLAYERS_DATA): alerts.append(dbc.Alert(f"{target_p_data[1]} already on your team.", color="info", duration=3000))
             elif target_pid in GLOBALLY_DRAFTED_PLAYER_IDS: alerts.append(dbc.Alert(f"{target_p_data[1]} already drafted by other.", color="danger", duration=3000))
@@ -715,7 +761,7 @@ else:
             else:
                 USER_DRAFTED_PLAYERS_DATA.append(target_p_data); GLOBALLY_DRAFTED_PLAYER_IDS.add(target_pid)
                 alerts.append(dbc.Alert(f"You drafted {target_p_data[1]}!", color="success", duration=3000))
-                new_trigger_val, player_query_return_value = trigger_val + 1, ""
+                new_trigger_val, player_query_return_value = trigger_val + 1, "" # Clear input
         elif action_type == "undo":
             try:
                 pid_undo = int(active_query); p_data_undo = get_player_data(pid_undo)
@@ -729,11 +775,12 @@ else:
                     if pid_undo in USER_PLAYER_SLOT_ASSIGNMENTS: del USER_PLAYER_SLOT_ASSIGNMENTS[pid_undo]
                     if actions_performed_undo:
                         alerts.append(dbc.Alert(f"{p_data_undo[1]} removed from {', '.join(actions_performed_undo)}.", color="info", duration=3000))
-                        new_trigger_val, undo_input_return_value = trigger_val + 1, ""
+                        new_trigger_val, undo_input_return_value = trigger_val + 1, "" # Clear input
                     else: alerts.append(dbc.Alert(f"{p_data_undo[1]} not in drafted lists.", color="info", duration=3000))
             except ValueError: alerts.append(dbc.Alert(f"Invalid ID for undo: '{active_query}'. Must be number.", color="danger", duration=3000))
-        if not (target_pid and target_p_data) and action_type not in ["undo", None] and not alerts:
-            alerts.append(dbc.Alert("Player not processed. Check input.", color="warning", duration=3000))
+        if not (target_pid and target_p_data) and action_type not in ["undo", None] and not alerts: # If lookup failed for a draft action
+            alerts.append(dbc.Alert("Player not found or processed for drafting. Check input.", color="warning", duration=3000))
+        
         return alerts, new_trigger_val, player_query_return_value, undo_input_return_value
 
     @app.callback(
@@ -756,7 +803,7 @@ else:
         elif triggered_id == 'restart-draft-cancel-btn': new_modal_state = False
         return new_modal_state, action_message, new_trigger_val
 
-    @app.callback(
+    @app.callback( # Run GA
         Output('ga-results-display', 'children'), Input('run-ga-btn', 'n_clicks'), prevent_initial_call=True
     )
     def run_ga_callback(n_clicks): # Unchanged
@@ -771,16 +818,32 @@ else:
             next_pick_suggestion_data = suggest_next_best_pick(best_ids, user_picked_ids)
         return format_ga_results_display(best_ids, best_fit, ga_msgs, next_pick_suggestion_data)
 
-    @app.callback(
+    @app.callback( # Scoring Mode Change
+        [Output('ui-update-trigger', 'data', allow_duplicate=True),
+         Output('action-messages-div', 'children', allow_duplicate=True)],
+        Input('scoring-mode-selector', 'value'),
+        State('ui-update-trigger', 'data'),
+        prevent_initial_call=True 
+    )
+    def handle_scoring_mode_change(selected_mode, current_trigger_val): # Unchanged
+        global CURRENT_SCORING_MODE, USER_PLAYER_SLOT_ASSIGNMENTS, CURRENT_AVAILABLE_PLAYER_POOL_FOR_GA, CURRENT_PLAYERS_BY_POSITION_FOR_GA
+        if selected_mode == CURRENT_SCORING_MODE: return dash.no_update, dash.no_update
+        previous_mode = CURRENT_SCORING_MODE
+        update_player_data_for_scoring_mode(selected_mode)
+        USER_PLAYER_SLOT_ASSIGNMENTS = {}; CURRENT_AVAILABLE_PLAYER_POOL_FOR_GA, CURRENT_PLAYERS_BY_POSITION_FOR_GA = [], {}
+        alert_msg = dbc.Alert(f"Scoring mode: {previous_mode} → {selected_mode}. Player data updated.", color="info", duration=5000, dismissable=True)
+        return current_trigger_val + 1, alert_msg
+        
+    @app.callback( # Update All Displays
         [Output('my-team-starters-table', 'children'), Output('my-team-starters-summary', 'children'),
          Output('my-team-bench-table', 'children'), Output('my-team-bench-summary', 'children'),
          Output('my-team-surplus-players', 'children'), Output('current-round-info', 'children'),
          Output('drafted-players-display', 'children'), Output('available-players-display', 'children'),
          Output('roster-structure-summary-display', 'children', allow_duplicate=True)],
-        [Input('ui-update-trigger', 'data'), Input('available-pos-filter-dd', 'value')],
-        prevent_initial_call=True
+        [Input('ui-update-trigger', 'data'), Input('available-pos-filter-dd', 'value'), Input('scoring-mode-selector', 'value')],
+        prevent_initial_call=True 
     )
-    def update_all_displays(trigger_val, avail_pos_filter): # Unchanged
+    def update_all_displays(trigger_val, avail_pos_filter, scoring_mode_val_unused): # Unchanged
         headers, sd, spg, ns, ts, _, bd, nb, tb, surplus = format_team_display_data()
         tbl_args = {"style_cell": {'textAlign': 'left', 'padding': '5px', 'fontFamily': 'sans-serif', 'fontSize': '0.85rem'},
                     "style_header": {'backgroundColor': 'rgba(0,0,0,0.03)', 'fontWeight': 'bold', 'borderBottom': '1px solid #dee2e6'},
@@ -791,7 +854,7 @@ else:
         surplus_disp = [html.H6("Surplus:", className="mt-3")] + [dbc.ListGroup(surplus, flush=True, style={'fontSize': '0.85rem'})] if surplus else []
         overall_picks = len(GLOBALLY_DRAFTED_PLAYER_IDS)
         curr_overall_rd = math.floor(overall_picks / PICKS_PER_ROUND) + 1 if PICKS_PER_ROUND > 0 else 1
-        round_info_txt = f"Draft: Rd {curr_overall_rd} (Overall Pick {overall_picks + 1})"
+        round_info_txt = f"Draft: Rd {curr_overall_rd} (Pick {overall_picks + 1}) | Mode: {CURRENT_SCORING_MODE}"
         drafted_disp, avail_disp = [], []
         if not GLOBALLY_DRAFTED_PLAYER_IDS: drafted_disp.append(html.P("None yet.", className="text-muted"))
         else:
