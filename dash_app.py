@@ -49,7 +49,7 @@ STARTER_PPG_MULTIPLIER = 1.6
 BENCH_ADP_PENALTY_SCALER = 0.3
 STARTER_ADP_WEAKNESS_THRESHOLD = 2
 EARLY_ROUND_ADP_BENCH_PENALTY = 0.5
-BYE_WEEK_CONFLICT_PENALTY_FACTOR = 0.002
+BYE_WEEK_CONFLICT_PENALTY_FACTOR = 0.001
 
 # --- Data Loading and Setup ---
 def load_player_pool_from_csv(filename=DEFAULT_CSV_FILENAME):
@@ -190,7 +190,6 @@ def find_player_flexible(query_str):
     name_only_query = " ".join(name_only_query_words)
     potential_query_lastname = name_only_query_words[-1] if name_only_query_words else None
     exact_csv_matches, strong_matches, partial_matches = [], [], []
-
     for p_data in INITIAL_PLAYER_POOL_DATA:
         pid, csv_name, csv_pos_col, _, _, _ = p_data
         csv_name_lower, csv_pos_col_lower = csv_name.lower(), csv_pos_col.lower()
@@ -481,14 +480,11 @@ else:
         items.append(dbc.ListGroupItem(f"Starter PPGs x{STARTER_PPG_MULTIPLIER} in fitness.", color="info"))
         return dbc.ListGroup(items, className="mb-3")
 
+    _INITIAL_ROSTER_KEYS = list(ROSTER_STRUCTURE.keys()) # Used for creating inputs and callback states
+
     def create_roster_input_rows(current_roster_config):
         rows = []
-        # Ensure a consistent order of keys for creating inputs
-        # Use the keys from the initial global ROSTER_STRUCTURE definition
-        # or a predefined list if ROSTER_STRUCTURE can change its keys (which it doesn't currently)
-        defined_roster_keys = list(ROSTER_STRUCTURE.keys())
-
-        for pos_key in defined_roster_keys:
+        for pos_key in _INITIAL_ROSTER_KEYS:
             rows.append(
                 dbc.Row([
                     dbc.Col(dbc.Label(pos_key, html_for=f"roster-input-{pos_key.replace('/', '-')}", className="text-end"), width=5),
@@ -566,7 +562,6 @@ else:
         dbc.Row(dbc.Col(id='current-round-info', className="text-center mb-3 fw-bold fs-5")),
         dbc.Row(dbc.Col(id='action-messages-div')), 
         dbc.Row(dbc.Col(id='roster-update-messages-div')),
-
         dbc.Row([
             dbc.Col([
                 dbc.Card([
@@ -615,80 +610,141 @@ else:
         ], className="mb-5")
     ], fluid=True)
 
-    _initial_roster_keys_for_callback_setup = list(ROSTER_STRUCTURE.keys())
-    _roster_input_states_for_callback = [State(f"roster-input-{pos_key.replace('/', '-')}", "value") for pos_key in _initial_roster_keys_for_callback_setup]
+    _roster_input_outputs_for_callback = [Output(f"roster-input-{pos_key.replace('/', '-')}", "value") for pos_key in _INITIAL_ROSTER_KEYS]
+    _roster_input_states_for_callback = [State(f"roster-input-{pos_key.replace('/', '-')}", "value") for pos_key in _INITIAL_ROSTER_KEYS]
 
     @app.callback(
-        [Output('action-messages-div', 'children', allow_duplicate=True), Output('ui-update-trigger', 'data', allow_duplicate=True)],
-        [Input('draft-opponent-btn', 'n_clicks'), Input('draft-my-team-btn', 'n_clicks'), Input('undo-draft-btn', 'n_clicks')],
-        [State('player-query-input', 'value'), State('undo-player-id-input', 'value'), State('ui-update-trigger', 'data')],
+        [Output('roster-update-messages-div', 'children'),
+         Output('ui-update-trigger', 'data', allow_duplicate=True),
+         Output('roster-structure-summary-display', 'children', allow_duplicate=True)] +
+        _roster_input_outputs_for_callback,
+        Input('apply-roster-changes-btn', 'n_clicks'),
+        _roster_input_states_for_callback + [State('ui-update-trigger', 'data')],
         prevent_initial_call=True
     )
-    def handle_draft_actions(opp_clicks, my_clicks, undo_clicks, query, undo_pid_state, trigger_val):
+    def handle_apply_roster_changes(n_clicks, *all_input_and_state_values):
+        global ROSTER_STRUCTURE, USER_PLAYER_SLOT_ASSIGNMENTS, CURRENT_AVAILABLE_PLAYER_POOL_FOR_GA, CURRENT_PLAYERS_BY_POSITION_FOR_GA
+        num_roster_inputs = len(_INITIAL_ROSTER_KEYS)
+        new_roster_counts_from_ui = all_input_and_state_values[:num_roster_inputs]
+        current_trigger_val = all_input_and_state_values[num_roster_inputs]
+        alerts, temp_new_roster, valid_update = [], {}, True
+        previous_valid_roster_structure = ROSTER_STRUCTURE.copy() if isinstance(ROSTER_STRUCTURE, dict) else {}
+        for i, key in enumerate(_INITIAL_ROSTER_KEYS):
+            count_val = new_roster_counts_from_ui[i]
+            if count_val is None: count_val = 0 
+            if not isinstance(count_val, int) or count_val < 0:
+                alerts.append(dbc.Alert(f"Invalid count for {key}: '{count_val}'. Must be non-negative integer.", color="danger", duration=4000))
+                valid_update = False; break
+            temp_new_roster[key] = count_val
+        if not valid_update:
+            reverted_input_values = [previous_valid_roster_structure.get(key, 0) for key in _INITIAL_ROSTER_KEYS]
+            return [alerts, current_trigger_val, get_roster_structure_info()] + reverted_input_values
+        if sum(temp_new_roster.values()) == 0 :
+            alerts.append(dbc.Alert("Roster cannot have zero total spots.", color="danger", duration=5000))
+            reverted_input_values = [previous_valid_roster_structure.get(key, 0) for key in _INITIAL_ROSTER_KEYS]
+            return [alerts, current_trigger_val, get_roster_structure_info()] + reverted_input_values
+        ROSTER_STRUCTURE = temp_new_roster
+        update_roster_derived_globals()
+        USER_PLAYER_SLOT_ASSIGNMENTS = {}; CURRENT_AVAILABLE_PLAYER_POOL_FOR_GA, CURRENT_PLAYERS_BY_POSITION_FOR_GA = [], {}
+        alerts.append(dbc.Alert("Roster structure updated! Team assignments re-evaluated.", color="success", duration=4000))
+        current_input_values = [ROSTER_STRUCTURE.get(key, 0) for key in _INITIAL_ROSTER_KEYS]
+        return [alerts, current_trigger_val + 1, get_roster_structure_info()] + current_input_values
+
+    @app.callback(
+        [Output('action-messages-div', 'children', allow_duplicate=True),
+         Output('ui-update-trigger', 'data', allow_duplicate=True),
+         Output('player-query-input', 'value', allow_duplicate=True),
+         Output('undo-player-id-input', 'value', allow_duplicate=True)],
+        [Input('draft-opponent-btn', 'n_clicks'), Input('draft-my-team-btn', 'n_clicks'),
+         Input('undo-draft-btn', 'n_clicks'), Input('player-query-input', 'n_submit')],
+        [State('player-query-input', 'value'), State('undo-player-id-input', 'value'),
+         State('ui-update-trigger', 'data')],
+        prevent_initial_call=True
+    )
+    def handle_draft_actions(opp_clicks, my_clicks, undo_clicks, query_n_submit,
+                             query_val_state, undo_pid_state, trigger_val):
         global GLOBALLY_DRAFTED_PLAYER_IDS, USER_DRAFTED_PLAYERS_DATA, USER_PLAYER_SLOT_ASSIGNMENTS
-        ctx_id = ctx.triggered_id; alerts = []
-        if not query and ctx_id in ['draft-opponent-btn', 'draft-my-team-btn']:
-            alerts.append(dbc.Alert("Player name/ID empty.", color="warning", duration=3000)); return alerts, trigger_val
-        if not undo_pid_state and ctx_id == 'undo-draft-btn':
-            alerts.append(dbc.Alert("Undo Player ID empty.", color="warning", duration=3000)); return alerts, trigger_val
+        triggered_prop_id = ctx.triggered[0]['prop_id']
+        triggered_component_id = triggered_prop_id.split('.')[0]
+        alerts, new_trigger_val = [], trigger_val
+        player_query_return_value, undo_input_return_value = query_val_state, undo_pid_state
+        active_query, action_type = "", None
+
+        if triggered_component_id == 'player-query-input' and triggered_prop_id.endswith('.n_submit'):
+            active_query, action_type = query_val_state, "draft_opponent_enter"
+        elif triggered_component_id == 'draft-opponent-btn': active_query, action_type = query_val_state, "draft_opponent_button"
+        elif triggered_component_id == 'draft-my-team-btn': active_query, action_type = query_val_state, "draft_my_team"
+        elif triggered_component_id == 'undo-draft-btn': active_query, action_type = undo_pid_state, "undo"
+
+        if not active_query and action_type not in [None, "undo"]:
+             alerts.append(dbc.Alert("Player name/ID for drafting is empty.", color="warning", duration=3000))
+             return alerts, new_trigger_val, player_query_return_value, undo_input_return_value
+        if not active_query and action_type == "undo":
+             alerts.append(dbc.Alert("Player ID for undo is empty.", color="warning", duration=3000))
+             return alerts, new_trigger_val, player_query_return_value, undo_input_return_value
+        
         target_pid, target_p_data = None, None
-        if ctx_id in ['draft-opponent-btn', 'draft-my-team-btn']:
+        if action_type in ["draft_opponent_enter", "draft_opponent_button", "draft_my_team"]:
             try:
-                pid_candidate = int(query); p_data_cand = get_player_data(pid_candidate)
+                pid_candidate = int(active_query); p_data_cand = get_player_data(pid_candidate)
                 if p_data_cand: target_pid, target_p_data = pid_candidate, p_data_cand
-                else: alerts.append(dbc.Alert(f"ID '{query}' not found.", color="danger", duration=3000))
+                else: alerts.append(dbc.Alert(f"ID '{active_query}' not found.", color="danger", duration=3000))
             except ValueError:
-                matched = find_player_flexible(query)
-                if not matched: alerts.append(dbc.Alert(f"Name '{query}' not found by flexible search.", color="danger", duration=3000))
+                matched = find_player_flexible(active_query)
+                if not matched: alerts.append(dbc.Alert(f"Name '{active_query}' not found.", color="danger", duration=3000))
                 elif len(matched) == 1: target_pid, target_p_data = matched[0][0], matched[0]
                 else: 
                     ambiguous_display = [f"{p[1]} ({p[2]}, ID: {p[0]})" for p in matched[:5]]
-                    alerts.append(dbc.Alert(f"Ambiguous: '{query}'. Matches: {', '.join(ambiguous_display)}. Use ID.", color="warning", duration=6000))
-            if target_pid and target_p_data:
-                if ctx_id == 'draft-opponent-btn':
-                    if target_pid in GLOBALLY_DRAFTED_PLAYER_IDS and target_pid not in [p[0] for p in USER_DRAFTED_PLAYERS_DATA]:
-                         alerts.append(dbc.Alert(f"{target_p_data[1]} already drafted by other.", color="info", duration=3000))
-                    else:
-                        GLOBALLY_DRAFTED_PLAYER_IDS.add(target_pid); removed_from_user = False
-                        if any(p[0] == target_pid for p in USER_DRAFTED_PLAYERS_DATA):
-                            USER_DRAFTED_PLAYERS_DATA = [p for p in USER_DRAFTED_PLAYERS_DATA if p[0] != target_pid]
-                            if target_pid in USER_PLAYER_SLOT_ASSIGNMENTS: del USER_PLAYER_SLOT_ASSIGNMENTS[target_pid]
-                            removed_from_user = True
-                        alerts.append(dbc.Alert(f"{target_p_data[1]} opponent draft." + (" Removed." if removed_from_user else ""), color="success", duration=3000)); trigger_val += 1
-                elif ctx_id == 'draft-my-team-btn':
-                    if any(p[0] == target_pid for p in USER_DRAFTED_PLAYERS_DATA): alerts.append(dbc.Alert(f"{target_p_data[1]} already on your team.", color="info", duration=3000))
-                    elif target_pid in GLOBALLY_DRAFTED_PLAYER_IDS: alerts.append(dbc.Alert(f"{target_p_data[1]} already drafted by other.", color="danger", duration=3000))
-                    elif len(USER_DRAFTED_PLAYERS_DATA) >= TOTAL_ROSTER_SPOTS: alerts.append(dbc.Alert("Roster full.", color="danger", duration=3000))
-                    else:
-                        USER_DRAFTED_PLAYERS_DATA.append(target_p_data); GLOBALLY_DRAFTED_PLAYER_IDS.add(target_pid)
-                        alerts.append(dbc.Alert(f"You drafted {target_p_data[1]}!", color="success", duration=3000)); trigger_val += 1
-        elif ctx_id == 'undo-draft-btn':
+                    alerts.append(dbc.Alert(f"Ambiguous: '{active_query}'. Matches: {', '.join(ambiguous_display)}. Use ID.", color="warning", duration=6000))
+        
+        if target_pid and target_p_data and action_type in ["draft_opponent_enter", "draft_opponent_button"]:
+            if target_pid in GLOBALLY_DRAFTED_PLAYER_IDS and target_pid not in [p[0] for p in USER_DRAFTED_PLAYERS_DATA]:
+                 alerts.append(dbc.Alert(f"{target_p_data[1]} already drafted by other.", color="info", duration=3000))
+            else:
+                GLOBALLY_DRAFTED_PLAYER_IDS.add(target_pid); removed_from_user = False
+                if any(p[0] == target_pid for p in USER_DRAFTED_PLAYERS_DATA):
+                    USER_DRAFTED_PLAYERS_DATA = [p for p in USER_DRAFTED_PLAYERS_DATA if p[0] != target_pid]
+                    if target_pid in USER_PLAYER_SLOT_ASSIGNMENTS: del USER_PLAYER_SLOT_ASSIGNMENTS[target_pid]
+                    removed_from_user = True
+                alerts.append(dbc.Alert(f"{target_p_data[1]} opponent draft." + (" Removed." if removed_from_user else ""), color="success", duration=3000))
+                new_trigger_val, player_query_return_value = trigger_val + 1, ""
+        elif target_pid and target_p_data and action_type == "draft_my_team":
+            if any(p[0] == target_pid for p in USER_DRAFTED_PLAYERS_DATA): alerts.append(dbc.Alert(f"{target_p_data[1]} already on your team.", color="info", duration=3000))
+            elif target_pid in GLOBALLY_DRAFTED_PLAYER_IDS: alerts.append(dbc.Alert(f"{target_p_data[1]} already drafted by other.", color="danger", duration=3000))
+            elif len(USER_DRAFTED_PLAYERS_DATA) >= TOTAL_ROSTER_SPOTS: alerts.append(dbc.Alert("Roster full.", color="danger", duration=3000))
+            else:
+                USER_DRAFTED_PLAYERS_DATA.append(target_p_data); GLOBALLY_DRAFTED_PLAYER_IDS.add(target_pid)
+                alerts.append(dbc.Alert(f"You drafted {target_p_data[1]}!", color="success", duration=3000))
+                new_trigger_val, player_query_return_value = trigger_val + 1, ""
+        elif action_type == "undo":
             try:
-                pid_undo = int(undo_pid_state); p_data_undo = get_player_data(pid_undo)
+                pid_undo = int(active_query); p_data_undo = get_player_data(pid_undo)
                 if not p_data_undo: alerts.append(dbc.Alert(f"ID '{pid_undo}' not found for undo.", color="danger", duration=3000))
                 else:
-                    actions = [];
-                    if pid_undo in GLOBALLY_DRAFTED_PLAYER_IDS: GLOBALLY_DRAFTED_PLAYER_IDS.remove(pid_undo); actions.append("global")
+                    actions_performed_undo = []
+                    if pid_undo in GLOBALLY_DRAFTED_PLAYER_IDS: GLOBALLY_DRAFTED_PLAYER_IDS.remove(pid_undo); actions_performed_undo.append("global")
                     user_len_before = len(USER_DRAFTED_PLAYERS_DATA)
                     USER_DRAFTED_PLAYERS_DATA = [p for p in USER_DRAFTED_PLAYERS_DATA if p[0] != pid_undo]
-                    if len(USER_DRAFTED_PLAYERS_DATA) < user_len_before: actions.append("your team")
+                    if len(USER_DRAFTED_PLAYERS_DATA) < user_len_before: actions_performed_undo.append("your team")
                     if pid_undo in USER_PLAYER_SLOT_ASSIGNMENTS: del USER_PLAYER_SLOT_ASSIGNMENTS[pid_undo]
-                    if actions: alerts.append(dbc.Alert(f"{p_data_undo[1]} removed from {', '.join(actions)}.", color="info", duration=3000)); trigger_val += 1
+                    if actions_performed_undo:
+                        alerts.append(dbc.Alert(f"{p_data_undo[1]} removed from {', '.join(actions_performed_undo)}.", color="info", duration=3000))
+                        new_trigger_val, undo_input_return_value = trigger_val + 1, ""
                     else: alerts.append(dbc.Alert(f"{p_data_undo[1]} not in drafted lists.", color="info", duration=3000))
-            except ValueError: alerts.append(dbc.Alert(f"Invalid ID for undo: '{undo_pid_state}'.", color="danger", duration=3000))
-        return alerts, trigger_val
+            except ValueError: alerts.append(dbc.Alert(f"Invalid ID for undo: '{active_query}'. Must be number.", color="danger", duration=3000))
+        if not (target_pid and target_p_data) and action_type not in ["undo", None] and not alerts:
+            alerts.append(dbc.Alert("Player not processed. Check input.", color="warning", duration=3000))
+        return alerts, new_trigger_val, player_query_return_value, undo_input_return_value
 
     @app.callback(
         [Output('restart-draft-modal', 'is_open'),
          Output('action-messages-div', 'children', allow_duplicate=True),
          Output('ui-update-trigger', 'data', allow_duplicate=True)],
-        [Input('restart-draft-open-modal-btn', 'n_clicks'),
-         Input('restart-draft-confirm-btn', 'n_clicks'),
-         Input('restart-draft-cancel-btn', 'n_clicks')],
+        [Input('restart-draft-open-modal-btn', 'n_clicks'), Input('restart-draft-confirm-btn', 'n_clicks'), Input('restart-draft-cancel-btn', 'n_clicks')],
         [State('restart-draft-modal', 'is_open'), State('ui-update-trigger', 'data')],
         prevent_initial_call=True
     )
-    def manage_restart_draft_modal(open_clicks, confirm_clicks, cancel_clicks, current_modal_is_open, current_trigger_val):
+    def manage_restart_draft_modal(open_clicks, confirm_clicks, cancel_clicks, current_modal_is_open, current_trigger_val): # Unchanged
         global GLOBALLY_DRAFTED_PLAYER_IDS, USER_DRAFTED_PLAYERS_DATA, USER_PLAYER_SLOT_ASSIGNMENTS, CURRENT_AVAILABLE_PLAYER_POOL_FOR_GA, CURRENT_PLAYERS_BY_POSITION_FOR_GA
         triggered_id, new_modal_state, action_message, new_trigger_val = ctx.triggered_id, current_modal_is_open, [], current_trigger_val
         if triggered_id == 'restart-draft-open-modal-btn': new_modal_state = True
@@ -701,63 +757,9 @@ else:
         return new_modal_state, action_message, new_trigger_val
 
     @app.callback(
-        [Output('roster-update-messages-div', 'children'),
-         Output('ui-update-trigger', 'data', allow_duplicate=True),
-         Output('roster-structure-summary-display', 'children', allow_duplicate=True)],
-        # Inputs:
-        Input('apply-roster-changes-btn', 'n_clicks'),
-        # States: A list combining the dynamic roster inputs and the trigger state
-        _roster_input_states_for_callback + [State('ui-update-trigger', 'data')],
-        prevent_initial_call=True
-    )
-    def handle_apply_roster_changes(n_clicks, *all_states_tuple): # Changed signature
-        global ROSTER_STRUCTURE, USER_PLAYER_SLOT_ASSIGNMENTS, CURRENT_AVAILABLE_PLAYER_POOL_FOR_GA, CURRENT_PLAYERS_BY_POSITION_FOR_GA
-        
-        # Unpack all_states_tuple
-        num_roster_inputs = len(_initial_roster_keys_for_callback_setup)
-        new_roster_counts_args = all_states_tuple[:num_roster_inputs]
-        current_trigger_val = all_states_tuple[num_roster_inputs] # Last element
-
-        # print(f"[DEBUG] handle_apply_roster_changes triggered. n_clicks: {n_clicks}") # Keep for debugging if needed
-        # print(f"[DEBUG] Received roster counts args: {new_roster_counts_args}")
-        # print(f"[DEBUG] Received current_trigger_val: {current_trigger_val}")
-
-        alerts, temp_new_roster, valid_update, total_new_spots = [], {}, True, 0
-        keys_in_order = _initial_roster_keys_for_callback_setup
-
-        # This loop should use new_roster_counts_args correctly now
-        for i, key in enumerate(keys_in_order):
-            count_val = new_roster_counts_args[i]
-            if count_val is None: count_val = 0 
-            if not isinstance(count_val, int) or count_val < 0:
-                alerts.append(dbc.Alert(f"Invalid count for {key}: '{count_val}'. Must be non-negative integer.", color="danger", duration=4000))
-                valid_update = False; break
-            temp_new_roster[key] = count_val
-            total_new_spots += count_val
-        
-        if not valid_update: 
-            return alerts, current_trigger_val, get_roster_structure_info() # Use original trigger_val on failure
-
-        if sum(temp_new_roster.values()) == 0 :
-            alerts.append(dbc.Alert("Roster cannot have zero total spots.", color="danger", duration=5000))
-            return alerts, current_trigger_val, get_roster_structure_info()
-
-        ROSTER_STRUCTURE = temp_new_roster
-        update_roster_derived_globals()
-        USER_PLAYER_SLOT_ASSIGNMENTS = {} 
-        CURRENT_AVAILABLE_PLAYER_POOL_FOR_GA, CURRENT_PLAYERS_BY_POSITION_FOR_GA = [], {}
-        
-        alerts.append(dbc.Alert("Roster structure updated! Team assignments will be re-evaluated.", color="success", duration=4000))
-        
-        new_trigger_val = current_trigger_val + 1
-        updated_roster_summary = get_roster_structure_info()
-
-        return alerts, new_trigger_val, updated_roster_summary
-
-    @app.callback(
         Output('ga-results-display', 'children'), Input('run-ga-btn', 'n_clicks'), prevent_initial_call=True
     )
-    def run_ga_callback(n_clicks):
+    def run_ga_callback(n_clicks): # Unchanged
         if len(USER_DRAFTED_PLAYERS_DATA) >= TOTAL_ROSTER_SPOTS: return [dbc.Alert("Roster full.", color="info")]
         prepare_for_ga_run()
         overall_picks = len(GLOBALLY_DRAFTED_PLAYER_IDS)
@@ -776,9 +778,9 @@ else:
          Output('drafted-players-display', 'children'), Output('available-players-display', 'children'),
          Output('roster-structure-summary-display', 'children', allow_duplicate=True)],
         [Input('ui-update-trigger', 'data'), Input('available-pos-filter-dd', 'value')],
-        prevent_initial_call=True # Changed to True as per Dash error requirement
+        prevent_initial_call=True
     )
-    def update_all_displays(trigger_val, avail_pos_filter):
+    def update_all_displays(trigger_val, avail_pos_filter): # Unchanged
         headers, sd, spg, ns, ts, _, bd, nb, tb, surplus = format_team_display_data()
         tbl_args = {"style_cell": {'textAlign': 'left', 'padding': '5px', 'fontFamily': 'sans-serif', 'fontSize': '0.85rem'},
                     "style_header": {'backgroundColor': 'rgba(0,0,0,0.03)', 'fontWeight': 'bold', 'borderBottom': '1px solid #dee2e6'},
