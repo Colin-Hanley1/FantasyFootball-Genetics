@@ -41,7 +41,7 @@ CURRENT_SCORING_MODE = "PPR"
 
 # --- GA Parameters ---
 POPULATION_SIZE = 100
-N_GENERATIONS = 100
+N_GENERATIONS = 250
 MUTATION_RATE = 0.20
 CROSSOVER_RATE = 0.8
 TOURNAMENT_SIZE = 5
@@ -229,56 +229,43 @@ def find_player_flexible(query_str):
     user_query_simple_lower = query_str.lower().replace('.', '').replace("'", "").strip()
     POSSIBLE_QUERY_POSITIONS = {"qb", "wr", "rb", "te", "k", "def", "dst"}
     query_pos_part = None
-    name_only_query_words_for_ln_match = [] # For lastname matching specifically
-    
+    name_only_query_words_for_ln_match = []
     temp_query_words = user_query_simple_lower.split()
     for word in temp_query_words:
         if word in POSSIBLE_QUERY_POSITIONS: query_pos_part = word
         else: name_only_query_words_for_ln_match.append(word)
     potential_query_lastname_norm = normalize_name_for_search(" ".join(name_only_query_words_for_ln_match[-1:])) if name_only_query_words_for_ln_match else ""
-
-
     exact_csv_matches, filn_format_matches, lastname_matches, strong_partial_matches, partial_matches = [], [], [], [], []
-
     for p_data in INITIAL_PLAYER_POOL_DATA:
         pid, csv_name, csv_pos_col, _, _, _, _, _, _, _ = p_data
         csv_name_lower, csv_pos_col_lower = csv_name.lower(), csv_pos_col.lower()
-
         if user_query_simple_lower == csv_name_lower: exact_csv_matches.append(p_data); continue
-        
         fi_csv, ln_csv = parse_csv_name_to_fi_ln(csv_name)
         csv_name_normalized_filn = fi_csv + ln_csv
-
         if user_query_normalized_filn == csv_name_normalized_filn:
             if query_pos_part and query_pos_part == csv_pos_col_lower: filn_format_matches.insert(0,p_data)
             elif not query_pos_part: filn_format_matches.append(p_data)
             else: partial_matches.append(p_data)
             continue
-            
-        if ln_csv and user_query_normalized_filn == ln_csv: # User query was single word, normalized, matches ln_csv
+        if ln_csv and user_query_normalized_filn == ln_csv:
             if query_pos_part and query_pos_part == csv_pos_col_lower: lastname_matches.insert(0,p_data)
             elif not query_pos_part: lastname_matches.append(p_data)
             else: partial_matches.append(p_data)
             continue
-            
         if ln_csv and potential_query_lastname_norm and len(potential_query_lastname_norm) >= 3 and ln_csv.startswith(potential_query_lastname_norm):
             if query_pos_part and query_pos_part == csv_pos_col_lower: strong_partial_matches.append(p_data)
             elif not query_pos_part: partial_matches.append(p_data)
             continue
-
         csv_name_part_after_underscore = csv_name_lower.split('_',1)[-1]
         if len(user_query_simple_lower) >= 3 and user_query_simple_lower in csv_name_part_after_underscore:
-            partial_matches.append(p_data)
-            continue
-            
+            partial_matches.append(p_data); continue
     final_results, seen_ids = [], set()
     for p_list in [exact_csv_matches, filn_format_matches, lastname_matches, strong_partial_matches, partial_matches]:
         for p_item in p_list:
             if p_item[0] not in seen_ids: final_results.append(p_item); seen_ids.add(p_item[0])
     return final_results
 
-# --- GA Core Functions (create_individual, calculate_fitness, repair_lineup, etc. - Unchanged) ---
-def create_individual(): # Unchanged
+def create_individual():
     individual_ids, used_player_ids = [None] * TOTAL_ROSTER_SPOTS, set()
     for pid, slot_idx in USER_PLAYER_SLOT_ASSIGNMENTS.items():
         if 0 <= slot_idx < TOTAL_ROSTER_SPOTS: individual_ids[slot_idx] = pid; used_player_ids.add(pid)
@@ -292,8 +279,9 @@ def create_individual(): # Unchanged
         if individual_ids[i] is None and not any(s_idx == i for s_idx in USER_PLAYER_SLOT_ASSIGNMENTS.values()):
             individual_ids[i] = -99
     return individual_ids
-def create_initial_population(): return [create_individual() for _ in range(POPULATION_SIZE)] # Unchanged
-def calculate_fitness(individual_ids, curr_round): # Unchanged
+def create_initial_population(): return [create_individual() for _ in range(POPULATION_SIZE)]
+
+def calculate_fitness(individual_ids, curr_round):
     if not individual_ids or len(individual_ids) != TOTAL_ROSTER_SPOTS: return -float('inf'), 0, set(), []
     if any(pid is None or (not isinstance(pid, int)) or (pid <= 0 and pid != -99) for pid in individual_ids):
         inv_spots = sum(1 for pid in individual_ids if pid != -99 and (pid is None or not isinstance(pid, int) or pid <= 0))
@@ -363,6 +351,7 @@ def calculate_fitness(individual_ids, curr_round): # Unchanged
     if num_future_round_stacking_violations > 0:
         fitness_score -= (PENALTY_VIOLATION * num_future_round_stacking_violations * 1.5)
     return fitness_score, raw_ppg_sum, set(player_adp_rounds_in_lineup), valid_player_data_for_checks
+
 def repair_lineup(lineup_ids_to_repair): # Unchanged
     repaired_ids = list(lineup_ids_to_repair); # ... (rest of function as provided previously) ...
     if not repaired_ids or len(repaired_ids) != TOTAL_ROSTER_SPOTS: return create_individual()
@@ -561,7 +550,7 @@ else:
                 if is_starter: starters_d.append(row_data); starters_ppg_sum += p_data[3]; num_s +=1
                 else: bench_d.append(row_data); num_b +=1
             else:
-                row_data = {"slot": i, "pos": slot_type, "player": "-", "ppg": "-", "adp_rd": "-", "bye": "-"}
+                row_data = {"slot": i, "pos": slot_type, "player": "<EMPTY SLOT>", "ppg": "-", "adp_rd": "-", "bye": "-"}
                 if is_starter: starters_d.append(row_data)
                 else: bench_d.append(row_data)
         surplus_elems = [dbc.ListGroupItem(f"{p[1]}({p[2]}) PPG:{p[3]:.2f} Rd:{p[4]} Bye:{p[5] if p[5] > 0 else '-'}")
@@ -587,7 +576,7 @@ else:
                 user_pick_str = " (Your Pick)" if pid_slot in USER_PLAYER_SLOT_ASSIGNMENTS and USER_PLAYER_SLOT_ASSIGNMENTS.get(pid_slot) == i else ""
                 txt = ""
                 if p_data: txt = f"S{i:02d}({slot_type_disp:<10}): {p_data[1]:<20}({p_data[2]:<2}) PPG:{p_data[3]:>5.2f} Bye:{p_data[5] if p_data[5] > 0 else '-'} Rd:{p_data[4]:>2} {user_pick_str}"
-                elif pid_slot == -99: txt = f"S{i:02d}({slot_type_disp:<10}): -"
+                elif pid_slot == -99: txt = f"S{i:02d}({slot_type_disp:<10}): <EMPTY SLOT>"
                 else: txt = f"S{i:02d}({slot_type_disp:<10}): Invalid ID {pid_slot}"
                 items.append(dbc.ListGroupItem(txt, style={'fontSize': '0.8rem', 'padding': '0.25rem 0.5rem'}))
             lineup_details.append(dbc.ListGroup(items, flush=True, className="mt-2"))
@@ -662,7 +651,7 @@ else:
     _roster_input_outputs_for_callback = [Output(f"roster-input-{pos_key.replace('/', '-')}", "value") for pos_key in _INITIAL_ROSTER_KEYS]
     _roster_input_states_for_callback = [State(f"roster-input-{pos_key.replace('/', '-')}", "value") for pos_key in _INITIAL_ROSTER_KEYS]
 
-    @app.callback(
+    @app.callback( # Handle Apply Roster Changes (Unchanged from previous version)
         [Output('roster-update-messages-div', 'children'),
          Output('ui-update-trigger', 'data', allow_duplicate=True),
          Output('roster-structure-summary-display', 'children', allow_duplicate=True)] +
@@ -671,7 +660,7 @@ else:
         _roster_input_states_for_callback + [State('ui-update-trigger', 'data')],
         prevent_initial_call=True
     )
-    def handle_apply_roster_changes(n_clicks, *all_input_and_state_values): # Unchanged
+    def handle_apply_roster_changes(n_clicks, *all_input_and_state_values):
         global ROSTER_STRUCTURE, USER_PLAYER_SLOT_ASSIGNMENTS, CURRENT_AVAILABLE_PLAYER_POOL_FOR_GA, CURRENT_PLAYERS_BY_POSITION_FOR_GA
         num_roster_inputs = len(_INITIAL_ROSTER_KEYS)
         new_roster_counts_from_ui = all_input_and_state_values[:num_roster_inputs]
@@ -699,7 +688,7 @@ else:
         current_input_values = [ROSTER_STRUCTURE.get(key, 0) for key in _INITIAL_ROSTER_KEYS]
         return [alerts, current_trigger_val + 1, get_roster_structure_info()] + current_input_values
 
-    @app.callback( # MODIFIED for clearing inputs and Enter key
+    @app.callback( # Handle Draft Actions (Updated for input clearing and Enter key)
         [Output('action-messages-div', 'children', allow_duplicate=True),
          Output('ui-update-trigger', 'data', allow_duplicate=True),
          Output('player-query-input', 'value', allow_duplicate=True),
@@ -716,19 +705,16 @@ else:
         triggered_prop_id = ctx.triggered[0]['prop_id']
         triggered_component_id = triggered_prop_id.split('.')[0]
         alerts, new_trigger_val = [], trigger_val
-        player_query_return_value, undo_input_return_value = query_val_state, undo_pid_state # Default to not clearing
+        player_query_return_value, undo_input_return_value = query_val_state, undo_pid_state
         active_query, action_type = "", None
-
         if triggered_component_id == 'player-query-input' and triggered_prop_id.endswith('.n_submit'): active_query, action_type = query_val_state, "draft_opponent_enter"
         elif triggered_component_id == 'draft-opponent-btn': active_query, action_type = query_val_state, "draft_opponent_button"
         elif triggered_component_id == 'draft-my-team-btn': active_query, action_type = query_val_state, "draft_my_team"
         elif triggered_component_id == 'undo-draft-btn': active_query, action_type = undo_pid_state, "undo"
-        
         if not active_query and action_type not in [None, "undo"]:
              alerts.append(dbc.Alert("Player name/ID for drafting is empty.", color="warning", duration=3000)); return alerts, new_trigger_val, player_query_return_value, undo_input_return_value
         if not active_query and action_type == "undo":
              alerts.append(dbc.Alert("Player ID for undo is empty.", color="warning", duration=3000)); return alerts, new_trigger_val, player_query_return_value, undo_input_return_value
-        
         target_pid, target_p_data = None, None
         if action_type in ["draft_opponent_enter", "draft_opponent_button", "draft_my_team"]:
             try:
@@ -742,7 +728,6 @@ else:
                 else: 
                     ambiguous_display = [f"{p[1]} ({p[2]}, ID: {p[0]})" for p in matched[:5]]
                     alerts.append(dbc.Alert(f"Ambiguous: '{active_query}'. Matches: {', '.join(ambiguous_display)}. Use ID.", color="warning", duration=6000))
-        
         if target_pid and target_p_data and action_type in ["draft_opponent_enter", "draft_opponent_button"]:
             if target_pid in GLOBALLY_DRAFTED_PLAYER_IDS and target_pid not in [p[0] for p in USER_DRAFTED_PLAYERS_DATA]:
                  alerts.append(dbc.Alert(f"{target_p_data[1]} already drafted by other.", color="info", duration=3000))
@@ -753,7 +738,7 @@ else:
                     if target_pid in USER_PLAYER_SLOT_ASSIGNMENTS: del USER_PLAYER_SLOT_ASSIGNMENTS[target_pid]
                     removed_from_user = True
                 alerts.append(dbc.Alert(f"{target_p_data[1]} opponent draft." + (" Removed." if removed_from_user else ""), color="success", duration=3000))
-                new_trigger_val, player_query_return_value = trigger_val + 1, "" # Clear input
+                new_trigger_val, player_query_return_value = trigger_val + 1, ""
         elif target_pid and target_p_data and action_type == "draft_my_team":
             if any(p[0] == target_pid for p in USER_DRAFTED_PLAYERS_DATA): alerts.append(dbc.Alert(f"{target_p_data[1]} already on your team.", color="info", duration=3000))
             elif target_pid in GLOBALLY_DRAFTED_PLAYER_IDS: alerts.append(dbc.Alert(f"{target_p_data[1]} already drafted by other.", color="danger", duration=3000))
@@ -761,7 +746,7 @@ else:
             else:
                 USER_DRAFTED_PLAYERS_DATA.append(target_p_data); GLOBALLY_DRAFTED_PLAYER_IDS.add(target_pid)
                 alerts.append(dbc.Alert(f"You drafted {target_p_data[1]}!", color="success", duration=3000))
-                new_trigger_val, player_query_return_value = trigger_val + 1, "" # Clear input
+                new_trigger_val, player_query_return_value = trigger_val + 1, ""
         elif action_type == "undo":
             try:
                 pid_undo = int(active_query); p_data_undo = get_player_data(pid_undo)
@@ -775,15 +760,14 @@ else:
                     if pid_undo in USER_PLAYER_SLOT_ASSIGNMENTS: del USER_PLAYER_SLOT_ASSIGNMENTS[pid_undo]
                     if actions_performed_undo:
                         alerts.append(dbc.Alert(f"{p_data_undo[1]} removed from {', '.join(actions_performed_undo)}.", color="info", duration=3000))
-                        new_trigger_val, undo_input_return_value = trigger_val + 1, "" # Clear input
+                        new_trigger_val, undo_input_return_value = trigger_val + 1, ""
                     else: alerts.append(dbc.Alert(f"{p_data_undo[1]} not in drafted lists.", color="info", duration=3000))
             except ValueError: alerts.append(dbc.Alert(f"Invalid ID for undo: '{active_query}'. Must be number.", color="danger", duration=3000))
-        if not (target_pid and target_p_data) and action_type not in ["undo", None] and not alerts: # If lookup failed for a draft action
-            alerts.append(dbc.Alert("Player not found or processed for drafting. Check input.", color="warning", duration=3000))
-        
+        if not (target_pid and target_p_data) and action_type not in ["undo", None] and not alerts:
+            alerts.append(dbc.Alert("Player not processed. Check input.", color="warning", duration=3000))
         return alerts, new_trigger_val, player_query_return_value, undo_input_return_value
 
-    @app.callback(
+    @app.callback( # Manage Restart Draft Modal (Unchanged)
         [Output('restart-draft-modal', 'is_open'),
          Output('action-messages-div', 'children', allow_duplicate=True),
          Output('ui-update-trigger', 'data', allow_duplicate=True)],
@@ -791,7 +775,7 @@ else:
         [State('restart-draft-modal', 'is_open'), State('ui-update-trigger', 'data')],
         prevent_initial_call=True
     )
-    def manage_restart_draft_modal(open_clicks, confirm_clicks, cancel_clicks, current_modal_is_open, current_trigger_val): # Unchanged
+    def manage_restart_draft_modal(open_clicks, confirm_clicks, cancel_clicks, current_modal_is_open, current_trigger_val):
         global GLOBALLY_DRAFTED_PLAYER_IDS, USER_DRAFTED_PLAYERS_DATA, USER_PLAYER_SLOT_ASSIGNMENTS, CURRENT_AVAILABLE_PLAYER_POOL_FOR_GA, CURRENT_PLAYERS_BY_POSITION_FOR_GA
         triggered_id, new_modal_state, action_message, new_trigger_val = ctx.triggered_id, current_modal_is_open, [], current_trigger_val
         if triggered_id == 'restart-draft-open-modal-btn': new_modal_state = True
@@ -803,10 +787,10 @@ else:
         elif triggered_id == 'restart-draft-cancel-btn': new_modal_state = False
         return new_modal_state, action_message, new_trigger_val
 
-    @app.callback( # Run GA
+    @app.callback( # Run GA (Unchanged)
         Output('ga-results-display', 'children'), Input('run-ga-btn', 'n_clicks'), prevent_initial_call=True
     )
-    def run_ga_callback(n_clicks): # Unchanged
+    def run_ga_callback(n_clicks):
         if len(USER_DRAFTED_PLAYERS_DATA) >= TOTAL_ROSTER_SPOTS: return [dbc.Alert("Roster full.", color="info")]
         prepare_for_ga_run()
         overall_picks = len(GLOBALLY_DRAFTED_PLAYER_IDS)
@@ -818,14 +802,14 @@ else:
             next_pick_suggestion_data = suggest_next_best_pick(best_ids, user_picked_ids)
         return format_ga_results_display(best_ids, best_fit, ga_msgs, next_pick_suggestion_data)
 
-    @app.callback( # Scoring Mode Change
+    @app.callback( # Scoring Mode Change (Unchanged)
         [Output('ui-update-trigger', 'data', allow_duplicate=True),
          Output('action-messages-div', 'children', allow_duplicate=True)],
         Input('scoring-mode-selector', 'value'),
         State('ui-update-trigger', 'data'),
         prevent_initial_call=True 
     )
-    def handle_scoring_mode_change(selected_mode, current_trigger_val): # Unchanged
+    def handle_scoring_mode_change(selected_mode, current_trigger_val):
         global CURRENT_SCORING_MODE, USER_PLAYER_SLOT_ASSIGNMENTS, CURRENT_AVAILABLE_PLAYER_POOL_FOR_GA, CURRENT_PLAYERS_BY_POSITION_FOR_GA
         if selected_mode == CURRENT_SCORING_MODE: return dash.no_update, dash.no_update
         previous_mode = CURRENT_SCORING_MODE
@@ -834,7 +818,7 @@ else:
         alert_msg = dbc.Alert(f"Scoring mode: {previous_mode} → {selected_mode}. Player data updated.", color="info", duration=5000, dismissable=True)
         return current_trigger_val + 1, alert_msg
         
-    @app.callback( # Update All Displays
+    @app.callback( # Update All Displays (Unchanged from previous version with fixed prevent_initial_call)
         [Output('my-team-starters-table', 'children'), Output('my-team-starters-summary', 'children'),
          Output('my-team-bench-table', 'children'), Output('my-team-bench-summary', 'children'),
          Output('my-team-surplus-players', 'children'), Output('current-round-info', 'children'),
@@ -843,12 +827,16 @@ else:
         [Input('ui-update-trigger', 'data'), Input('available-pos-filter-dd', 'value'), Input('scoring-mode-selector', 'value')],
         prevent_initial_call=True 
     )
-    def update_all_displays(trigger_val, avail_pos_filter, scoring_mode_val_unused): # Unchanged
+    def update_all_displays(trigger_val, avail_pos_filter, scoring_mode_val_unused):
         headers, sd, spg, ns, ts, _, bd, nb, tb, surplus = format_team_display_data()
-        tbl_args = {"style_cell": {'textAlign': 'left', 'padding': '5px', 'fontFamily': 'sans-serif', 'fontSize': '0.85rem'},
-                    "style_header": {'backgroundColor': 'rgba(0,0,0,0.03)', 'fontWeight': 'bold', 'borderBottom': '1px solid #dee2e6'},
-                    "style_data_conditional": [{'if': {'row_index': 'odd'}, 'backgroundColor': 'rgba(0,0,0,0.015)'}],
-                    "style_table": {'border': '1px solid #dee2e6', 'borderRadius': '3px'}}
+        tbl_args = {"style_cell": {'textAlign': 'left', 'padding': '6px', 'fontFamily': 'sans-serif', 'fontSize': '0.85rem'},
+                    "style_header": {'backgroundColor': 'rgba(0,0,0,0.04)', 'fontWeight': 'bold', 'borderBottom': '2px solid #dee2e6'},
+                    "style_data_conditional": [
+                        {'if': {'row_index': 'odd'}, 'backgroundColor': 'rgba(0,0,0,0.02)'},
+                        {'if': {'column_id': 'PPG'}, 'textAlign': 'right'},
+                        {'if': {'column_id': 'ADP Rd'}, 'textAlign': 'right'},
+                        {'if': {'column_id': 'Bye'}, 'textAlign': 'right'}],
+                    "style_table": {'border': '1px solid #dee2e6', 'borderRadius': '4px', 'overflowX': 'auto'}}
         starters_tbl = dash_table.DataTable(columns=headers, data=sd, **tbl_args) if sd else html.P("No starters.", className="text-muted")
         bench_tbl = dash_table.DataTable(columns=headers, data=bd, **tbl_args) if bd else html.P("No bench.", className="text-muted")
         surplus_disp = [html.H6("Surplus:", className="mt-3")] + [dbc.ListGroup(surplus, flush=True, style={'fontSize': '0.85rem'})] if surplus else []
@@ -883,7 +871,7 @@ else:
     # --- Run the App ---
     if __name__ == '__main__':
         if INITIAL_SETUP_SUCCESS:
-            app.run(debug=False)
+            app.run(debug=False) # Recommended to set debug=False for production or stable use
         else:
             print("Dash application cannot start due to initialization errors. See console.")
             if 'app' in locals() and app: app.run(debug=True)
