@@ -53,6 +53,7 @@ EARLY_ROUND_ADP_BENCH_PENALTY = 0.5
 BYE_WEEK_CONFLICT_PENALTY_FACTOR = 0.001
 BACKUP_POSITION_PENALTY_SCALER = 0.4
 NEXT_PICK_ADP_LOOKAHEAD_ROUNDS = 1
+UNDRAFTABLE_ADP_PENALTY_SCALER = 0.1 
 
 # --- Data Loading and Setup ---
 def load_player_pool_from_csv(filename=DEFAULT_CSV_FILENAME):
@@ -281,37 +282,48 @@ def create_individual():
             individual_ids[i] = -99
     return individual_ids
 def create_initial_population(): return [create_individual() for _ in range(POPULATION_SIZE)]
-def calculate_fitness(individual_ids, curr_round):
+def calculate_fitness(individual_ids, curr_round): # curr_round is overall draft round
+    # 1. Initial validity checks (Unchanged)
     if not individual_ids or len(individual_ids) != TOTAL_ROSTER_SPOTS: return -float('inf'), 0, set(), []
     if any(pid is None or (not isinstance(pid, int)) or (pid <= 0 and pid != -99) for pid in individual_ids):
         inv_spots = sum(1 for pid in individual_ids if pid != -99 and (pid is None or not isinstance(pid, int) or pid <= 0))
         if inv_spots > 0: return -PENALTY_VIOLATION * (inv_spots + 20), 0, set(), []
+
     lineup_player_objects = [None] * TOTAL_ROSTER_SPOTS
+    # 2. Check for empty STARTING slots & build player objects
     for i, pid in enumerate(individual_ids):
         slot_type, is_starting_slot = POSITION_ORDER[i], not POSITION_ORDER[i].startswith("BN_")
         if pid == -99:
             if is_starting_slot: return -PENALTY_VIOLATION * 75, 0, set(), []
         else:
-            p_data = get_player_data(pid)
+            p_data = get_player_data(pid) # p_data is (id, name, pos, ppg, calculated_round, bye_week, ...)
             if p_data is None:
                 if is_starting_slot: return -PENALTY_VIOLATION * 65, 0, set(), []
                 else: return -PENALTY_VIOLATION * 30, 0, set(), []
             lineup_player_objects[i] = p_data
     valid_player_data_for_checks = [p_obj for p_obj in lineup_player_objects if p_obj is not None]
+
+    # 4. Roster position validation (Unchanged)
     for i, p_data_current in enumerate(lineup_player_objects):
         if p_data_current is None: continue
         slot_type, actual_pos = POSITION_ORDER[i], p_data_current[2]
         is_valid = (slot_type == actual_pos) or (slot_type in FLEX_ELIGIBILITY and actual_pos in FLEX_ELIGIBILITY[slot_type])
         if not is_valid: return -PENALTY_VIOLATION * 10, 0, set(), valid_player_data_for_checks
+    # 5. Check for duplicate players (Unchanged)
     player_ids_for_dup_check = [p[0] for p in valid_player_data_for_checks]
     if len(set(player_ids_for_dup_check)) != len(player_ids_for_dup_check):
         return -PENALTY_VIOLATION * 5, 0, set(), valid_player_data_for_checks
+
+    # 6. Calculate PPG components (Unchanged)
     raw_ppg_sum, fitness_ppg_component = 0, 0
     for i, p_data_calc in enumerate(lineup_player_objects):
         if p_data_calc is None: continue
-        ppg = p_data_calc[3]; raw_ppg_sum += ppg
+        ppg = p_data_calc[3]
+        raw_ppg_sum += ppg
         fitness_ppg_component += (ppg * STARTER_PPG_MULTIPLIER) if not POSITION_ORDER[i].startswith("BN_") else ppg
     fitness_score = fitness_ppg_component
+
+    # 7. Bench ADP Mismanagement Penalty (Unchanged)
     bench_adp_mismanagement_penalty = 0
     num_s_filled, sum_s_adp_rnds, min_s_adp_rnd_val = 0, 0, float('inf')
     for i_check, p_data_check in enumerate(lineup_player_objects):
@@ -328,28 +340,52 @@ def calculate_fitness(individual_ids, curr_round):
             if bench_p_adp_rnd <= 3 and min_s_adp_rnd_val > (bench_p_adp_rnd + STARTER_ADP_WEAKNESS_THRESHOLD):
                 bench_adp_mismanagement_penalty += (PENALTY_VIOLATION * EARLY_ROUND_ADP_BENCH_PENALTY * (4 - bench_p_adp_rnd) / 5.0)
     fitness_score -= bench_adp_mismanagement_penalty
+
+    # 8. Bye Week Conflict Penalty (Unchanged)
     bye_weeks_on_roster = [p[5] for p in valid_player_data_for_checks if p[5] is not None and 0 < p[5] < 20]
     bye_week_counts = Counter(bye_weeks_on_roster)
     num_bye_week_conflicts = sum(count - 1 for count in bye_week_counts.values() if count >= 2)
     if num_bye_week_conflicts > 0:
         fitness_score -= (PENALTY_VIOLATION * BYE_WEEK_CONFLICT_PENALTY_FACTOR * num_bye_week_conflicts)
+    
+    # 9. Missing Backups Penalty (Unchanged)
     missing_backup_penalty_points = 0
     core_starter_positions_defined = set()
     for slot, count in ROSTER_STRUCTURE.items():
         if count > 0 and not slot.startswith("BN_") and slot not in FLEX_ELIGIBILITY: core_starter_positions_defined.add(slot)
     if core_starter_positions_defined:
         bench_player_actual_positions = Counter()
-        for i, p_data in enumerate(lineup_player_objects):
-            if p_data is not None and POSITION_ORDER[i].startswith("BN_"): bench_player_actual_positions[p_data[2]] += 1
+        for i, p_data_obj in enumerate(lineup_player_objects): # Renamed to avoid conflict with outer p_data
+            if p_data_obj is not None and POSITION_ORDER[i].startswith("BN_"): bench_player_actual_positions[p_data_obj[2]] += 1
         for core_pos in core_starter_positions_defined:
             is_core_pos_started = any(p_obj and not POSITION_ORDER[i].startswith("BN_") and POSITION_ORDER[i] == core_pos and p_obj[2] == core_pos for i, p_obj in enumerate(lineup_player_objects))
             if is_core_pos_started and bench_player_actual_positions[core_pos] == 0: missing_backup_penalty_points += 1
         if missing_backup_penalty_points > 0: fitness_score -= (PENALTY_VIOLATION * BACKUP_POSITION_PENALTY_SCALER * missing_backup_penalty_points)
+
+    # 10. NEW: Penalty for drafting players with ADP beyond typical draft rounds
+    undraftable_adp_penalty = 0
+    # TOTAL_ROSTER_SPOTS represents the number of rounds in a standard draft
+    # Ensure TOTAL_ROSTER_SPOTS is greater than 0 to avoid issues with the threshold
+    if TOTAL_ROSTER_SPOTS > 0:
+        draft_round_threshold = TOTAL_ROSTER_SPOTS + 2 
+        for p_data_adp_check in valid_player_data_for_checks:
+            player_calculated_adp_round = p_data_adp_check[4] # active calculated_round
+            if player_calculated_adp_round > draft_round_threshold:
+                # Penalize more for each round beyond the threshold
+                excess_rounds = player_calculated_adp_round - draft_round_threshold
+                undraftable_adp_penalty += excess_rounds # Simple sum of excess rounds
+        
+        if undraftable_adp_penalty > 0:
+            fitness_score -= (PENALTY_VIOLATION * UNDRAFTABLE_ADP_PENALTY_SCALER * undraftable_adp_penalty)
+
+
+    # 11. Original ADP Round Stacking Penalty (Unchanged)
     player_adp_rounds_in_lineup = [p[4] for p in valid_player_data_for_checks]
     adp_round_counts = Counter(player_adp_rounds_in_lineup)
     num_future_round_stacking_violations = sum(count - 1 for adp_r, count in adp_round_counts.items() if count > 1 and adp_r >= curr_round)
     if num_future_round_stacking_violations > 0:
         fitness_score -= (PENALTY_VIOLATION * num_future_round_stacking_violations * 1.5)
+
     return fitness_score, raw_ppg_sum, set(player_adp_rounds_in_lineup), valid_player_data_for_checks
 def repair_lineup(lineup_ids_to_repair): # Unchanged
     repaired_ids = list(lineup_ids_to_repair); # ... (rest of function as provided previously) ...
@@ -602,7 +638,7 @@ else:
              dbc.ModalFooter([dbc.Button("Cancel", id="restart-draft-cancel-btn", color="secondary", className="ms-auto"),
                               dbc.Button("Confirm Restart", id="restart-draft-confirm-btn", color="danger")])],
             id="restart-draft-modal", is_open=False, centered=True),
-        dbc.Row(dbc.Col(html.H1("🏈 Live Fantasy Football Draft Assistant", className="text-center my-4"))),
+        dbc.Row(dbc.Col(html.H1("🏈 Evolve Draft: Genetic Algorithm Fantasy Football Advisor", className="text-center my-4"))),
         dbc.Row(dbc.Col(id='current-round-info', className="text-center mb-3 fw-bold fs-5")),
         dbc.Row(dbc.Col(id='action-messages-div')), 
         dbc.Row(dbc.Col(id='roster-update-messages-div')),
