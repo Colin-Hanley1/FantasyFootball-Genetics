@@ -54,6 +54,8 @@ BYE_WEEK_CONFLICT_PENALTY_FACTOR = 0.001
 BACKUP_POSITION_PENALTY_SCALER = 0.4
 NEXT_PICK_ADP_LOOKAHEAD_ROUNDS = 1
 UNDRAFTABLE_ADP_PENALTY_SCALER = 0.1 
+ALLOWED_REACH_ROUNDS = 1             # NEW: The number of rounds the GA is allowed to "reach" for a player without penalty.
+REACH_PENALTY_SCALER = 0.01
 
 # --- Data Loading and Setup ---
 def load_player_pool_from_csv(filename=DEFAULT_CSV_FILENAME):
@@ -282,7 +284,7 @@ def create_individual():
             individual_ids[i] = -99
     return individual_ids
 def create_initial_population(): return [create_individual() for _ in range(POPULATION_SIZE)]
-def calculate_fitness(individual_ids, curr_round): # curr_round is overall draft round
+def calculate_fitness(individual_ids, curr_round):
     # 1. Initial validity checks (Unchanged)
     if not individual_ids or len(individual_ids) != TOTAL_ROSTER_SPOTS: return -float('inf'), 0, set(), []
     if any(pid is None or (not isinstance(pid, int)) or (pid <= 0 and pid != -99) for pid in individual_ids):
@@ -355,31 +357,39 @@ def calculate_fitness(individual_ids, curr_round): # curr_round is overall draft
         if count > 0 and not slot.startswith("BN_") and slot not in FLEX_ELIGIBILITY: core_starter_positions_defined.add(slot)
     if core_starter_positions_defined:
         bench_player_actual_positions = Counter()
-        for i, p_data_obj in enumerate(lineup_player_objects): # Renamed to avoid conflict with outer p_data
-            if p_data_obj is not None and POSITION_ORDER[i].startswith("BN_"): bench_player_actual_positions[p_data_obj[2]] += 1
+        for i, p_data in enumerate(lineup_player_objects):
+            if p_data is not None and POSITION_ORDER[i].startswith("BN_"): bench_player_actual_positions[p_data[2]] += 1
         for core_pos in core_starter_positions_defined:
             is_core_pos_started = any(p_obj and not POSITION_ORDER[i].startswith("BN_") and POSITION_ORDER[i] == core_pos and p_obj[2] == core_pos for i, p_obj in enumerate(lineup_player_objects))
             if is_core_pos_started and bench_player_actual_positions[core_pos] == 0: missing_backup_penalty_points += 1
         if missing_backup_penalty_points > 0: fitness_score -= (PENALTY_VIOLATION * BACKUP_POSITION_PENALTY_SCALER * missing_backup_penalty_points)
 
-    # 10. NEW: Penalty for drafting players with ADP beyond typical draft rounds
-    undraftable_adp_penalty = 0
-    # TOTAL_ROSTER_SPOTS represents the number of rounds in a standard draft
-    # Ensure TOTAL_ROSTER_SPOTS is greater than 0 to avoid issues with the threshold
+    # 10. Late-Round Player Penalty (Unchanged)
     if TOTAL_ROSTER_SPOTS > 0:
         draft_round_threshold = TOTAL_ROSTER_SPOTS + 2 
-        for p_data_adp_check in valid_player_data_for_checks:
-            player_calculated_adp_round = p_data_adp_check[4] # active calculated_round
-            if player_calculated_adp_round > draft_round_threshold:
-                # Penalize more for each round beyond the threshold
-                excess_rounds = player_calculated_adp_round - draft_round_threshold
-                undraftable_adp_penalty += excess_rounds # Simple sum of excess rounds
+        undraftable_adp_penalty = sum(p[4] - draft_round_threshold for p in valid_player_data_for_checks if p[4] > draft_round_threshold)
+        if undraftable_adp_penalty > 0: fitness_score -= (PENALTY_VIOLATION * 0.1 * undraftable_adp_penalty) # Using 0.1 as a small scaler
+    
+    # 11. NEW: Penalty for "reaching" for players too far ahead of their ADP
+    total_reach_penalty_points = 0
+    for p_data_reach in valid_player_data_for_checks:
+        player_adp_round = p_data_reach[4] # The player's generic calculated_round
         
-        if undraftable_adp_penalty > 0:
-            fitness_score -= (PENALTY_VIOLATION * UNDRAFTABLE_ADP_PENALTY_SCALER * undraftable_adp_penalty)
+        # A "reach" is when the player's ADP round is later than the current draft round
+        # e.g., drafting a Round 5 player in Round 3. `curr_round` is the context for the next pick.
+        reach_amount = player_adp_round - curr_round
+        
+        # We apply a penalty only if the reach exceeds the allowed amount (e.g., ALLOWED_REACH_ROUNDS = 1)
+        if reach_amount > ALLOWED_REACH_ROUNDS:
+            # The penalty is based on how many rounds of "excess reach" there are
+            excess_reach = reach_amount - ALLOWED_REACH_ROUNDS
+            total_reach_penalty_points += excess_reach # Accumulate excess rounds
 
+    if total_reach_penalty_points > 0:
+        # A simple linear penalty based on the total number of "excess reach" rounds
+        fitness_score -= (PENALTY_VIOLATION * REACH_PENALTY_SCALER * total_reach_penalty_points)
 
-    # 11. Original ADP Round Stacking Penalty (Unchanged)
+    # 12. Original ADP Round Stacking Penalty (Unchanged)
     player_adp_rounds_in_lineup = [p[4] for p in valid_player_data_for_checks]
     adp_round_counts = Counter(player_adp_rounds_in_lineup)
     num_future_round_stacking_violations = sum(count - 1 for adp_r, count in adp_round_counts.items() if count > 1 and adp_r >= curr_round)
