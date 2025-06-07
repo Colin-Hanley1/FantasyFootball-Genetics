@@ -2,6 +2,7 @@ import dash
 from dash import dcc, html, dash_table, ctx
 from dash.dependencies import Input, Output, State
 import dash_bootstrap_components as dbc
+from dash_bootstrap_templates import load_figure_template # <-- ADD THIS LINE
 
 import random
 import math
@@ -47,15 +48,15 @@ CROSSOVER_RATE = 0.8
 TOURNAMENT_SIZE = 5
 PENALTY_VIOLATION = 10000
 STARTER_PPG_MULTIPLIER = 1.6
-BENCH_ADP_PENALTY_SCALER = 0.3
+BENCH_ADP_PENALTY_SCALER = 0.9
 STARTER_ADP_WEAKNESS_THRESHOLD = 2
 EARLY_ROUND_ADP_BENCH_PENALTY = 0.5
 BYE_WEEK_CONFLICT_PENALTY_FACTOR = 0.005
 BACKUP_POSITION_PENALTY_SCALER = 0.4
-NEXT_PICK_ADP_LOOKAHEAD_ROUNDS = 1
+NEXT_PICK_ADP_LOOKAHEAD_ROUNDS = 2
 UNDRAFTABLE_ADP_PENALTY_SCALER = 0.1 
 ALLOWED_REACH_ROUNDS = 1             # NEW: The number of rounds the GA is allowed to "reach" for a player without penalty.
-REACH_PENALTY_SCALER = 0.01
+REACH_PENALTY_SCALER = 0.0
 
 # --- Data Loading and Setup ---
 def load_player_pool_from_csv(filename=DEFAULT_CSV_FILENAME):
@@ -562,8 +563,9 @@ try:
     INITIAL_SETUP_SUCCESS = True
 except SystemExit: INITIAL_SETUP_SUCCESS = False
 
-DBC_THEME = dbc.themes.FLATLY
+DBC_THEME = dbc.themes.DARKLY
 app = dash.Dash(__name__, external_stylesheets=[DBC_THEME], suppress_callback_exceptions=True)
+load_figure_template(DBC_THEME)
 server = app.server
 
 if not INITIAL_SETUP_SUCCESS:
@@ -571,7 +573,8 @@ if not INITIAL_SETUP_SUCCESS:
 else:
     _INITIAL_ROSTER_KEYS = list(ROSTER_STRUCTURE.keys())
     def get_roster_structure_info(): # Unchanged
-        items = [dbc.ListGroupItem(html.H5("Current Roster Settings", className="mb-0"), className="bg-light")]
+# New line
+        items = [dbc.ListGroupItem(html.H5("Current Roster Settings", className="mb-0"), className="bg-secondary text-white")]        
         for slot, count in ROSTER_STRUCTURE.items():
             elig_str = f" (Eligible: {', '.join(FLEX_ELIGIBILITY[slot])})" if slot in FLEX_ELIGIBILITY else ""
             items.append(dbc.ListGroupItem(f"{slot}: {count}{elig_str}"))
@@ -679,7 +682,7 @@ else:
                 dbc.Card([
                     dbc.CardHeader(html.H4("Available Players", className="mb-0")),
                     dbc.CardBody([
-                        dcc.Dropdown(id='available-pos-filter-dd', options=[{'label': 'All', 'value': 'ALL'}] + [{'label': p, 'value': p} for p in sorted(list(set(pl[2] for pl in INITIAL_PLAYER_POOL_DATA)))], value='ALL', clearable=False, className="mb-2"),
+                        dcc.Dropdown(id='available-pos-filter-dd', options=[{'label': 'All', 'value': 'ALL'}] + [{'label': p, 'value': p} for p in sorted(list(set(pl[2] for pl in INITIAL_PLAYER_POOL_DATA)))], value='ALL', clearable=False, className="mb-2 dbc"),
                         html.Div(id='available-players-display', style={'maxHeight': '300px', 'overflowY': 'auto'})])
                 ]),
                  dbc.Card(id='roster-structure-summary-display', className="mt-3", body=False)
@@ -906,14 +909,17 @@ else:
     )
     def update_all_displays(trigger_val, avail_pos_filter, scoring_mode_val_unused):
         headers, sd, spg, ns, ts, _, bd, nb, tb, surplus = format_team_display_data()
-        tbl_args = {"style_cell": {'textAlign': 'left', 'padding': '6px', 'fontFamily': 'sans-serif', 'fontSize': '0.85rem'},
-                    "style_header": {'backgroundColor': 'rgba(0,0,0,0.04)', 'fontWeight': 'bold', 'borderBottom': '2px solid #dee2e6'},
-                    "style_data_conditional": [
-                        {'if': {'row_index': 'odd'}, 'backgroundColor': 'rgba(0,0,0,0.02)'},
-                        {'if': {'column_id': 'PPG'}, 'textAlign': 'right'},
-                        {'if': {'column_id': 'ADP Rd'}, 'textAlign': 'right'},
-                        {'if': {'column_id': 'Bye'}, 'textAlign': 'right'}],
-                    "style_table": {'border': '1px solid #dee2e6', 'borderRadius': '4px', 'overflowX': 'auto'}}
+        # New table styling for dark mode
+        tbl_args = {
+            "style_cell": {'textAlign': 'left', 'padding': '8px', 'fontFamily': 'sans-serif', 'fontSize': '0.9rem',
+                        'backgroundColor': '#2B303A', 'color': '#EFEFEF', 'border': '1px solid #4E5D6C'},
+            "style_header": {'backgroundColor': '#1F242D', 'fontWeight': 'bold', 'border': '1px solid #4E5D6C'},
+            "style_data_conditional": [
+                {'if': {'row_index': 'odd'}, 'backgroundColor': '#333A44'},
+                {'if': {'column_type': 'numeric'}, 'textAlign': 'right'}
+            ],
+            "style_table": {'borderRadius': '4px', 'overflow': 'hidden'},
+        }
         starters_tbl = dash_table.DataTable(columns=headers, data=sd, **tbl_args) if sd else html.P("No starters.", className="text-muted")
         bench_tbl = dash_table.DataTable(columns=headers, data=bd, **tbl_args) if bd else html.P("No bench.", className="text-muted")
         surplus_disp = [html.H6("Surplus:", className="mt-3")] + [dbc.ListGroup(surplus, flush=True, style={'fontSize': '0.85rem'})] if surplus else []
