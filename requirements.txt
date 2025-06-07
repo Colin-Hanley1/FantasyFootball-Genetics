@@ -2,4 +2,4 @@ dash
 dash-bootstrap-components
 numpy
 gunicorn 
-
+dash-boostrap-templates
