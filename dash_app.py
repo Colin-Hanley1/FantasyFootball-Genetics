@@ -13,7 +13,7 @@ import numpy as np
 
 # --- Configuration Constants ---
 GAMES_IN_SEASON = 17
-PICKS_PER_ROUND = 12
+PICKS_PER_ROUND = 8
 DEFAULT_CSV_FILENAME = "player_pool.csv"
 GA_LOG_FILENAME = "ga_training_log.csv"
 
@@ -42,16 +42,16 @@ CURRENT_SCORING_MODE = "PPR"
 
 # --- GA Parameters ---
 POPULATION_SIZE = 100
-N_GENERATIONS = 250
-MUTATION_RATE = 0.20
+N_GENERATIONS = 100
+MUTATION_RATE = 0.2
 CROSSOVER_RATE = 0.8
 TOURNAMENT_SIZE = 5
 PENALTY_VIOLATION = 10000
-STARTER_PPG_MULTIPLIER = 1.6
-BENCH_ADP_PENALTY_SCALER = 0.9
+STARTER_PPG_MULTIPLIER = 5
+BENCH_ADP_PENALTY_SCALER = 1
 STARTER_ADP_WEAKNESS_THRESHOLD = 2
 EARLY_ROUND_ADP_BENCH_PENALTY = 0.5
-BYE_WEEK_CONFLICT_PENALTY_FACTOR = 0.005
+BYE_WEEK_CONFLICT_PENALTY_FACTOR = 0.001
 BACKUP_POSITION_PENALTY_SCALER = 0.4
 NEXT_PICK_ADP_LOOKAHEAD_ROUNDS = 2
 UNDRAFTABLE_ADP_PENALTY_SCALER = 0.1 
@@ -664,6 +664,21 @@ else:
                                                 value=CURRENT_SCORING_MODE, labelStyle={'display': 'inline-block', 'marginRight': '20px'}, inputClassName="me-1"))
                 ], className="mb-3"),
                 dbc.Card([
+    dbc.CardHeader(html.H5("League Settings", className="mb-0")),
+    dbc.CardBody([
+        dbc.Label("Number of Teams (Picks Per Round):"),
+        dcc.Slider(
+            id='teams-slider',
+            min=8,
+            max=16,
+            step=1,
+            value=PICKS_PER_ROUND, # Set initial value from your global constant
+            marks={i: str(i) for i in range(8, 17, 2)}, # Marks for 8, 10, 12, 14, 16
+            className="p-0" # Padding override for better alignment
+        ),
+    ], className="p-3")
+], className="mb-3"),
+                dbc.Card([
                     dbc.CardHeader(html.H5("Customize Roster Structure", className="mb-0")),
                     dbc.CardBody(create_roster_input_rows(ROSTER_STRUCTURE) + [dbc.Button("Apply Roster Changes", id="apply-roster-changes-btn", color="success", outline=True, className="w-100 mt-3")])
                 ], className="mb-3"),
@@ -709,14 +724,40 @@ else:
     _roster_input_states_for_callback = [State(f"roster-input-{pos_key.replace('/', '-')}", "value") for pos_key in _INITIAL_ROSTER_KEYS]
 
     @app.callback(
-        [Output('roster-update-messages-div', 'children'),
-         Output('ui-update-trigger', 'data', allow_duplicate=True),
-         Output('roster-structure-summary-display', 'children', allow_duplicate=True)] +
-        _roster_input_outputs_for_callback,
-        Input('apply-roster-changes-btn', 'n_clicks'),
-        _roster_input_states_for_callback + [State('ui-update-trigger', 'data')],
-        prevent_initial_call=True
-    )
+    [Output('ui-update-trigger', 'data', allow_duplicate=True),
+     Output('action-messages-div', 'children', allow_duplicate=True)],
+    Input('teams-slider', 'value'),
+    [State('ui-update-trigger', 'data')],
+    prevent_initial_call=True 
+)
+    def handle_league_size_change(new_team_count, current_trigger_val):
+        global PICKS_PER_ROUND, USER_PLAYER_SLOT_ASSIGNMENTS, \
+            CURRENT_AVAILABLE_PLAYER_POOL_FOR_GA, CURRENT_PLAYERS_BY_POSITION_FOR_GA
+
+        if new_team_count is None or new_team_count == PICKS_PER_ROUND:
+            return dash.no_update, dash.no_update
+
+        previous_count = PICKS_PER_ROUND
+        PICKS_PER_ROUND = new_team_count # Update the global variable
+
+        # This is the crucial step: recalculate all player PPG and calculated_round values
+        # based on the new number of picks per round.
+        update_player_data_for_scoring_mode(CURRENT_SCORING_MODE)
+        
+        # Roster assignments and available players need to be re-evaluated
+        # as the draft context and player round values have changed.
+        USER_PLAYER_SLOT_ASSIGNMENTS = {} 
+        CURRENT_AVAILABLE_PLAYER_POOL_FOR_GA = []
+        CURRENT_PLAYERS_BY_POSITION_FOR_GA = {}
+
+        alert_msg = dbc.Alert(
+            f"League size updated from {previous_count} to {PICKS_PER_ROUND} teams. All player data has been recalculated.", 
+            color="info", 
+            duration=5000, 
+            dismissable=True
+        )
+        
+        return current_trigger_val + 1, alert_msg
     def handle_apply_roster_changes(n_clicks, *all_input_and_state_values): # Unchanged
         global ROSTER_STRUCTURE, USER_PLAYER_SLOT_ASSIGNMENTS, CURRENT_AVAILABLE_PLAYER_POOL_FOR_GA, CURRENT_PLAYERS_BY_POSITION_FOR_GA
         num_roster_inputs = len(_INITIAL_ROSTER_KEYS)
@@ -898,13 +939,16 @@ else:
         alert_msg = dbc.Alert(f"Scoring mode: {previous_mode} → {selected_mode}. Player data updated.", color="info", duration=5000, dismissable=True)
         return current_trigger_val + 1, alert_msg
         
-    @app.callback( # Update All Displays (Unchanged)
+    @app.callback(
         [Output('my-team-starters-table', 'children'), Output('my-team-starters-summary', 'children'),
          Output('my-team-bench-table', 'children'), Output('my-team-bench-summary', 'children'),
          Output('my-team-surplus-players', 'children'), Output('current-round-info', 'children'),
          Output('drafted-players-display', 'children'), Output('available-players-display', 'children'),
          Output('roster-structure-summary-display', 'children', allow_duplicate=True)],
-        [Input('ui-update-trigger', 'data'), Input('available-pos-filter-dd', 'value'), Input('scoring-mode-selector', 'value')],
+        [Input('ui-update-trigger', 'data'), 
+         Input('available-pos-filter-dd', 'value'), 
+         Input('scoring-mode-selector', 'value'),
+         Input('teams-slider', 'value')], # <-- ADDED THIS INPUT
         prevent_initial_call=True 
     )
     def update_all_displays(trigger_val, avail_pos_filter, scoring_mode_val_unused):
