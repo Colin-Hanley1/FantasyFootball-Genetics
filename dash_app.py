@@ -951,49 +951,48 @@ else:
          Input('teams-slider', 'value')], # <-- ADDED THIS INPUT
         prevent_initial_call=True 
     )
-    def update_all_displays(trigger_val, avail_pos_filter, scoring_mode_val_unused):
-        headers, sd, spg, ns, ts, _, bd, nb, tb, surplus = format_team_display_data()
-        # New table styling for dark mode
-        tbl_args = {
-            "style_cell": {'textAlign': 'left', 'padding': '8px', 'fontFamily': 'sans-serif', 'fontSize': '0.9rem',
-                        'backgroundColor': '#2B303A', 'color': '#EFEFEF', 'border': '1px solid #4E5D6C'},
-            "style_header": {'backgroundColor': '#1F242D', 'fontWeight': 'bold', 'border': '1px solid #4E5D6C'},
-            "style_data_conditional": [
-                {'if': {'row_index': 'odd'}, 'backgroundColor': '#333A44'},
-                {'if': {'column_type': 'numeric'}, 'textAlign': 'right'}
-            ],
-            "style_table": {'borderRadius': '4px', 'overflow': 'hidden'},
-        }
-        starters_tbl = dash_table.DataTable(columns=headers, data=sd, **tbl_args) if sd else html.P("No starters.", className="text-muted")
-        bench_tbl = dash_table.DataTable(columns=headers, data=bd, **tbl_args) if bd else html.P("No bench.", className="text-muted")
-        surplus_disp = [html.H6("Surplus:", className="mt-3")] + [dbc.ListGroup(surplus, flush=True, style={'fontSize': '0.85rem'})] if surplus else []
-        overall_picks = len(GLOBALLY_DRAFTED_PLAYER_IDS)
-        curr_overall_rd = math.floor(overall_picks / PICKS_PER_ROUND) + 1 if PICKS_PER_ROUND > 0 else 1
-        round_info_txt = f"Draft: Rd {curr_overall_rd} (Pick {overall_picks + 1}) | Mode: {CURRENT_SCORING_MODE}"
-        drafted_disp, avail_disp = [], []
-        if not GLOBALLY_DRAFTED_PLAYER_IDS: drafted_disp.append(html.P("None yet.", className="text-muted"))
-        else:
-            drafted_sorted = sorted([(get_player_data(pid), pid in [p[0] for p in USER_DRAFTED_PLAYERS_DATA])
-                                  for pid in GLOBALLY_DRAFTED_PLAYER_IDS if get_player_data(pid)], key=lambda x: x[0][4])
-            items = []
-            for p_data, is_user in drafted_sorted:
-                badge = dbc.Badge("You", color="success", pill=True, className="ms-auto") if is_user else None
-                bye_str = f" Bye:{p_data[5]}" if p_data[5] > 0 else ""
-                items.append(dbc.ListGroupItem([f"Rd {p_data[4]:>2}: {p_data[1]} ({p_data[2]}) PPG:{p_data[3]:.1f}{bye_str}", badge], className="d-flex justify-content-between align-items-center", style={'fontSize': '0.85rem'}))
-            drafted_disp = dbc.ListGroup(items, flush=True)
-        avail_items = []
-        avail_pool_sorted = sorted([p for p in INITIAL_PLAYER_POOL_DATA if p[0] not in GLOBALLY_DRAFTED_PLAYER_IDS], key=lambda x: (x[4], -x[3]))
-        count = 0; limit = 75
-        for p_av in avail_pool_sorted:
-            if avail_pos_filter != 'ALL' and p_av[2] != avail_pos_filter: continue
-            bye_str_av = f" Bye:{p_av[5]}" if p_av[5] > 0 else ""
-            avail_items.append(dbc.ListGroupItem(f"{p_av[1]}({p_av[2]}) PPG:{p_av[3]:.1f} Rd:{p_av[4]}{bye_str_av} (ID:{p_av[0]})", style={'fontSize': '0.85rem'}))
-            count +=1;
-            if count >= limit: break
-        if not avail_items: avail_items.append(dbc.ListGroupItem("None available.", className="text-muted"))
-        avail_disp = dbc.ListGroup(avail_items, flush=True)
-        roster_summary_children = get_roster_structure_info()
-        return starters_tbl, f"Starters ({ns}/{ts}) PPG: {spg:.2f}", bench_tbl, f"Bench ({nb}/{tb})", surplus_disp, round_info_txt, drafted_disp, avail_disp, roster_summary_children
+    def update_all_displays_from_actions(trigger_val, avail_pos_filter, scoring_mode_val_unused, teams_slider_val_unused):
+            # This function's logic is the same, but it's now correctly triggered *after* page load.
+            headers, sd, spg, ns, ts, _, bd, nb, tb, surplus = format_team_display_data()
+            tbl_args = {
+                "style_cell": {'textAlign': 'left', 'padding': '8px', 'fontFamily': 'sans-serif', 'fontSize': '0.9rem',
+                            'backgroundColor': '#2B303A', 'color': '#EFEFEF', 'border': '1px solid #4E5D6C'},
+                "style_header": {'backgroundColor': '#1F242D', 'fontWeight': 'bold', 'border': '1px solid #4E5D6C'},
+                "style_data_conditional": [
+                    {'if': {'row_index': 'odd'}, 'backgroundColor': '#333A44'},
+                    {'if': {'column_type': 'numeric'}, 'textAlign': 'right'}
+                ], "style_table": {'borderRadius': '4px', 'overflow': 'hidden'},
+            }
+            starters_tbl = dash_table.DataTable(columns=headers, data=sd, **tbl_args) if sd else html.P("No starters.", className="text-muted")
+            bench_tbl = dash_table.DataTable(columns=headers, data=bd, **tbl_args) if bd else html.P("No bench.", className="text-muted")
+            surplus_disp = [html.H6("Surplus:", className="mt-3")] + [dbc.ListGroup(surplus, flush=True, style={'fontSize': '0.85rem'})] if surplus else []
+            overall_picks = len(GLOBALLY_DRAFTED_PLAYER_IDS)
+            curr_overall_rd = math.floor(overall_picks / PICKS_PER_ROUND) + 1 if PICKS_PER_ROUND > 0 else 1
+            round_info_txt = f"Draft: Rd {curr_overall_rd} (Pick {overall_picks + 1}) | Mode: {CURRENT_SCORING_MODE}"
+            drafted_disp, avail_disp = [], []
+            if not GLOBALLY_DRAFTED_PLAYER_IDS: drafted_disp.append(html.P("None yet.", className="text-muted"))
+            else:
+                drafted_sorted = sorted([(get_player_data(pid), pid in [p[0] for p in USER_DRAFTED_PLAYERS_DATA]) for pid in GLOBALLY_DRAFTED_PLAYER_IDS if get_player_data(pid)], key=lambda x: x[0][5])
+                items = []
+                for p_data, is_user in drafted_sorted:
+                    badge = dbc.Badge("You", color="success", pill=True, className="ms-auto") if is_user else None
+                    bye_str = f" Bye:{p_data[6]}" if p_data[6] > 0 else ""
+                    items.append(dbc.ListGroupItem([f"Rd {p_data[5]:>2}: {p_data[1]} ({p_data[2]}) PPG:{p_data[4]:.1f}{bye_str}", badge], className="d-flex justify-content-between align-items-center", style={'fontSize': '0.85rem'}))
+                drafted_disp = dbc.ListGroup(items, flush=True)
+            avail_items = []
+            avail_pool_sorted = sorted([p for p in INITIAL_PLAYER_POOL_DATA if p[0] not in GLOBALLY_DRAFTED_PLAYER_IDS], key=lambda x: (x[5], -x[4]))
+            count = 0; limit = 75
+            for p_av in avail_pool_sorted:
+                if avail_pos_filter != 'ALL' and p_av[2] != avail_pos_filter: continue
+                bye_str_av = f" Bye:{p_av[6]}" if p_av[6] > 0 else ""
+                avail_items.append(dbc.ListGroupItem(f"{p_av[1]}({p_av[2]}) PPG:{p_av[4]:.1f} Rd:{p_av[5]}{bye_str_av} (ID:{p_av[0]})", style={'fontSize': '0.85rem'}))
+                count +=1;
+                if count >= limit: break
+            if not avail_items: avail_items.append(dbc.ListGroupItem("None available.", className="text-muted"))
+            avail_disp = dbc.ListGroup(avail_items, flush=True)
+            roster_summary_children = get_roster_structure_info()
+            return starters_tbl, f"Starters ({ns}/{ts}) PPG: {spg:.2f}", bench_tbl, f"Bench ({nb}/{tb})", surplus_disp, round_info_txt, drafted_disp, avail_disp, roster_summary_children
+
 
     # --- Run the App ---
     if __name__ == '__main__':
