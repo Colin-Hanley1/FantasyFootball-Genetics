@@ -304,9 +304,8 @@ def genetic_algorithm_adp_lineup(curr_round, ga_context, processed_id_map, sessi
         raw_ppg_sum, fitness_ppg_component = 0, 0
         for i, p_data_calc in enumerate(lineup_player_objects):
             if p_data_calc is None: continue
-            ppg = p_data_calc[3]
+            ppg, is_starter = p_data_calc[3], not position_order[i].startswith("BN_")
             raw_ppg_sum += ppg
-            is_starter = not position_order[i].startswith("BN_")
             fitness_ppg_component += (ppg * STARTER_PPG_MULTIPLIER) if is_starter else ppg
         fitness_score = fitness_ppg_component
         bench_adp_mismanagement_penalty = 0
@@ -322,30 +321,21 @@ def genetic_algorithm_adp_lineup(curr_round, ga_context, processed_id_map, sessi
                         bench_adp_mismanagement_penalty += (PENALTY_VIOLATION * EARLY_ROUND_ADP_BENCH_PENALTY * (4 - bench_p_adp_rnd) / 5.0)
         fitness_score -= bench_adp_mismanagement_penalty
         bye_weeks_on_roster = [p[5] for p in valid_player_data_for_checks if p[5] is not None and 0 < p[5] < 20]
-        bye_week_counts = Counter(bye_weeks_on_roster)
-        num_bye_week_conflicts = sum(count - 1 for count in bye_week_counts.values() if count >= 2)
+        num_bye_week_conflicts = sum(count - 1 for count in Counter(bye_weeks_on_roster).values() if count >= 2)
         if num_bye_week_conflicts > 0: fitness_score -= (PENALTY_VIOLATION * BYE_WEEK_CONFLICT_PENALTY_FACTOR * num_bye_week_conflicts)
         missing_backup_penalty_points = 0
         core_starter_positions_defined = {slot for slot, count in roster_structure.items() if count > 0 and not slot.startswith("BN_") and slot not in FLEX_ELIGIBILITY}
         if core_starter_positions_defined:
-            bench_player_actual_positions = Counter()
-            for i, p_data in enumerate(lineup_player_objects):
-                if p_data is not None and position_order[i].startswith("BN_"): bench_player_actual_positions[p_data[2]] += 1
+            bench_player_actual_positions = Counter(p[2] for i, p in enumerate(lineup_player_objects) if p is not None and position_order[i].startswith("BN_"))
             for core_pos in core_starter_positions_defined:
-                is_core_pos_started = any(p_obj and not position_order[i].startswith("BN_") and p_obj[2] == core_pos for i, p_obj in enumerate(lineup_player_objects))
-                if is_core_pos_started and bench_player_actual_positions[core_pos] == 0: missing_backup_penalty_points += 1
+                if any(p and not position_order[i].startswith("BN_") and p[2] == core_pos for i, p in enumerate(lineup_player_objects)) and bench_player_actual_positions[core_pos] == 0:
+                    missing_backup_penalty_points += 1
             if missing_backup_penalty_points > 0: fitness_score -= (PENALTY_VIOLATION * BACKUP_POSITION_PENALTY_SCALER * missing_backup_penalty_points)
         if total_roster_spots > 0:
             draft_round_threshold = total_roster_spots + 2
             undraftable_adp_penalty = sum(p[4] - draft_round_threshold for p in valid_player_data_for_checks if p[4] > draft_round_threshold)
             if undraftable_adp_penalty > 0: fitness_score -= (PENALTY_VIOLATION * UNDRAFTABLE_ADP_PENALTY_SCALER * undraftable_adp_penalty)
-        total_reach_penalty_points = 0
-        for p_data_reach in valid_player_data_for_checks:
-            player_adp_round = p_data_reach[4]
-            reach_amount = player_adp_round - current_draft_round
-            if reach_amount > ALLOWED_REACH_ROUNDS:
-                excess_reach = reach_amount - ALLOWED_REACH_ROUNDS
-                total_reach_penalty_points += excess_reach
+        total_reach_penalty_points = sum(p[4] - current_draft_round - ALLOWED_REACH_ROUNDS for p in valid_player_data_for_checks if (p[4] - current_draft_round) > ALLOWED_REACH_ROUNDS)
         if total_reach_penalty_points > 0: fitness_score -= (PENALTY_VIOLATION * REACH_PENALTY_SCALER * total_reach_penalty_points)
         player_adp_rounds_in_lineup = [p[4] for p in valid_player_data_for_checks]
         adp_round_counts = Counter(player_adp_rounds_in_lineup)
@@ -357,33 +347,29 @@ def genetic_algorithm_adp_lineup(curr_round, ga_context, processed_id_map, sessi
         repaired = list(lineup_ids)
         if not repaired or len(repaired) != total_roster_spots: return create_individual()
         for pid, slot_idx in user_slot_assignments.items():
-            if 0 <= slot_idx < total_roster_spots:
-                if repaired[slot_idx] != pid:
-                    try:
-                        current_occupant, other_idx = repaired[slot_idx], repaired.index(pid)
-                        repaired[slot_idx], repaired[other_idx] = pid, current_occupant
-                    except ValueError: repaired[slot_idx] = pid
+            if 0 <= slot_idx < total_roster_spots and repaired[slot_idx] != pid:
+                try:
+                    current_occupant, other_idx = repaired[slot_idx], repaired.index(pid)
+                    repaired[slot_idx], repaired[other_idx] = pid, current_occupant
+                except ValueError: repaired[slot_idx] = pid
         counts = Counter(pid for pid in repaired if pid not in [-99, None])
         for pid, count in counts.items():
             if count > 1:
-                indices = [i for i, x in enumerate(repaired) if x == pid]
-                indices_to_clear = [i for i in indices if i not in user_slot_assignments.values()]
-                for i in indices_to_clear[1:]: repaired[i] = -99
+                indices = [i for i, x in enumerate(repaired) if x == pid and i not in user_slot_assignments.values()]
+                for i in indices[1:]: repaired[i] = -99
         for i in range(total_roster_spots):
             if repaired[i] in [-99, None] and i not in user_slot_assignments.values():
                 slot_type = position_order[i]
                 current_pids = set(p for p in repaired if p not in [-99, None])
                 candidates = [p for p in get_eligible_players_for_slot_type(slot_type) if p[0] not in current_pids]
-                if candidates: repaired[i] = random.choice(candidates)[0]
-                else: repaired[i] = -99
+                repaired[i] = random.choice(candidates)[0] if candidates else -99
         return repaired
 
     def create_individual():
         individual = [None] * total_roster_spots
         used_pids = set()
         for pid, slot_idx in user_slot_assignments.items():
-            individual[slot_idx] = pid
-            used_pids.add(pid)
+            individual[slot_idx], used_pids = pid, used_pids.union({pid})
         for i in range(total_roster_spots):
             if individual[i] is None:
                 slot_type = position_order[i]
@@ -399,8 +385,7 @@ def genetic_algorithm_adp_lineup(curr_round, ga_context, processed_id_map, sessi
         tourn_size = min(TOURNAMENT_SIZE, len(population))
         if tourn_size <= 0: return random.choice(population)
         indices = random.sample(range(len(population)), tourn_size)
-        winner = max([(population[i], fitness_scores[i]) for i in indices], key=lambda x: x[1])
-        return winner[0]
+        return max([(population[i], fitness_scores[i]) for i in indices], key=lambda x: x[1])[0]
 
     def crossover(parent1, parent2):
         child1, child2 = list(parent1), list(parent2)
@@ -481,10 +466,13 @@ if not INITIAL_SETUP_SUCCESS:
 else:
     app.layout = dbc.Container([
         dcc.Store(id='session-store', storage_type='memory'),
-        dbc.Modal([dbc.ModalHeader(dbc.ModalTitle("Confirm Restart Draft")), dbc.ModalBody("Are you sure? All draft progress will be lost."), dbc.ModalFooter([dbc.Button("Cancel", id="restart-draft-cancel-btn", color="secondary"), dbc.Button("Confirm Restart", id="restart-draft-confirm-btn", color="danger")])], id="restart-draft-modal", is_open=False, centered=True),
+        # FIX: Removed Modal and alert Div. Added a single Toast component for all notifications.
+        dbc.Toast(id="action-toast", header="Notification", is_open=False, dismissable=True, duration=4000,
+                  icon="primary", style={"position": "fixed", "top": 10, "right": 10, "width": 350, "zIndex": 10},
+        ),
         dbc.Row(dbc.Col(html.H1("🏈 Evolve Draft: Multi-User Fantasy Football Advisor", className="text-center my-4"))),
         dbc.Row(dbc.Col(id='current-round-info', className="text-center mb-3 fw-bold fs-5")),
-        dbc.Row([dbc.Col(id='action-messages-div'), dbc.Col(id='roster-update-messages-div')]),
+        dbc.Row(dbc.Col(id='roster-update-messages-div')), # This div is only for non-toast roster update messages
         dbc.Row([
             dbc.Col(md=4, children=[
                 dbc.Card(id='settings-and-actions-card'),
@@ -502,25 +490,32 @@ else:
     # --- CALLBACKS ---
     @app.callback(Output('session-store', 'data'), Input('session-store', 'data'))
     def initialize_session_data(session_data):
-        if session_data is None:
-            print("New user session started. Initializing session data.")
-            return get_initial_session_data()
+        if session_data is None: return get_initial_session_data()
         return dash.no_update
 
+    # FIX: This callback now triggers the one-click restart and outputs to the Toast
     @app.callback(
-        Output('session-store', 'data', allow_duplicate=True),
-        [Input('teams-slider', 'value'), Input('scoring-mode-selector', 'value'), Input('restart-draft-confirm-btn', 'n_clicks')],
+        [Output('session-store', 'data', allow_duplicate=True),
+         Output('action-toast', 'is_open', allow_duplicate=True), Output('action-toast', 'children', allow_duplicate=True),
+         Output('action-toast', 'header', allow_duplicate=True), Output('action-toast', 'icon', allow_duplicate=True)],
+        [Input('teams-slider', 'value'), Input('scoring-mode-selector', 'value'), Input('restart-draft-btn', 'n_clicks')],
         State('session-store', 'data'), prevent_initial_call=True)
-    def handle_simple_session_modifiers(new_team_count, selected_mode, restart_clicks, session_data):
-        if session_data is None: return dash.no_update
+    def handle_session_modifiers(new_team_count, selected_mode, restart_clicks, session_data):
+        if session_data is None: return dash.no_update, False, "", "", ""
         triggered_id, new_session = ctx.triggered_id, copy.deepcopy(session_data)
+        toast_open, toast_children, toast_header, toast_icon = False, "", "", ""
+
         if triggered_id == 'teams-slider' and new_team_count != new_session.get('picks_per_round'):
             new_session.update({'picks_per_round': new_team_count, 'globally_drafted_player_ids': [], 'user_drafted_player_ids': []})
+            toast_open, toast_header, toast_icon, toast_children = True, "Settings Changed", "info", f"League size set to {new_team_count}. Draft reset."
         elif triggered_id == 'scoring-mode-selector' and selected_mode != new_session.get('scoring_mode'):
             new_session.update({'scoring_mode': selected_mode, 'globally_drafted_player_ids': [], 'user_drafted_player_ids': []})
-        elif triggered_id == 'restart-draft-confirm-btn':
+            toast_open, toast_header, toast_icon, toast_children = True, "Settings Changed", "info", f"Scoring mode set to {selected_mode}. Draft reset."
+        elif triggered_id == 'restart-draft-btn':
             new_session = get_initial_session_data()
-        return new_session
+            toast_open, toast_header, toast_icon, toast_children = True, "Draft Reset", "warning", "The draft has been successfully restarted."
+        
+        return new_session, toast_open, toast_children, toast_header, toast_icon
 
     @app.callback(
         [Output('session-store', 'data', allow_duplicate=True), Output('roster-update-messages-div', 'children')],
@@ -528,8 +523,8 @@ else:
         [State('session-store', 'data')] + [State(f"roster-input-{key.replace('/', '-')}", "value") for key in get_initial_session_data()['roster_structure'].keys()],
         prevent_initial_call=True)
     def handle_roster_change(n_clicks, session_data, *roster_values):
-        if n_clicks is None or session_data is None: return dash.no_update, dash.no_update
-        new_roster, alert = {}, dash.no_update
+        if n_clicks is None or session_data is None: return dash.no_update, None
+        new_roster, alert = {}, None
         valid_update = True
         all_roster_keys = get_initial_session_data()['roster_structure'].keys()
         for i, key in enumerate(all_roster_keys):
@@ -549,50 +544,62 @@ else:
         return dash.no_update, alert
 
     @app.callback(
-        [Output('session-store', 'data', allow_duplicate=True), Output('action-messages-div', 'children'),
+        [Output('session-store', 'data', allow_duplicate=True),
+         Output('action-toast', 'is_open', allow_duplicate=True), Output('action-toast', 'children', allow_duplicate=True),
+         Output('action-toast', 'header', allow_duplicate=True), Output('action-toast', 'icon', allow_duplicate=True),
          Output('player-query-input', 'value'), Output('undo-player-query-input', 'value')],
         [Input('draft-opponent-btn', 'n_clicks'), Input('draft-my-team-btn', 'n_clicks'), Input('undo-draft-btn', 'n_clicks'), Input('player-query-input', 'n_submit')],
         [State('player-query-input', 'value'), State('undo-player-query-input', 'value'), State('session-store', 'data')],
         prevent_initial_call=True)
     def handle_draft_actions(opp_clicks, my_clicks, undo_clicks, n_submit, query_val, undo_val, session_data):
-        if not ctx.triggered_id or session_data is None: return dash.no_update, dash.no_update, query_val, undo_val
-        triggered_id, new_session, alert = ctx.triggered_id, copy.deepcopy(session_data), dash.no_update
+        if not ctx.triggered_id or session_data is None:
+            return dash.no_update, False, "", "", "", query_val, undo_val
+
+        triggered_id = ctx.triggered_id
+        new_session = copy.deepcopy(session_data)
         query_out, undo_out = query_val, undo_val
-        active_query, action_type, is_successful_action = None, None, False
-        if triggered_id == 'player-query-input': action_type, active_query = 'opponent', query_val
-        elif triggered_id == 'draft-opponent-btn': action_type, active_query = 'opponent', query_val
-        elif triggered_id == 'draft-my-team-btn': action_type, active_query = 'my_team', query_val
-        elif triggered_id == 'undo-draft-btn': action_type, active_query = 'undo', undo_val
-        if not active_query: return dash.no_update, dbc.Alert("Player name/ID cannot be empty.", color="warning", duration=0), query_val, undo_val
+        is_successful_action = False
+        toast_children, toast_header, toast_icon = "", "", ""
+
+        active_query, action_type = (query_val, 'opponent') if triggered_id in ['player-query-input', 'draft-opponent-btn'] else \
+                                    (query_val, 'my_team') if triggered_id == 'draft-my-team-btn' else \
+                                    (undo_val, 'undo') if triggered_id == 'undo-draft-btn' else (None, None)
+        if not active_query:
+            toast_header, toast_icon, toast_children = "Input Error", "danger", "Player name/ID cannot be empty."
+            return dash.no_update, True, toast_children, toast_header, toast_icon, query_val, undo_val
+
         matched, p_data_dict = find_player_flexible(active_query, MASTER_PLAYER_POOL_RAW), None
-        if not matched: alert = dbc.Alert(f"Player '{active_query}' not found.", color="danger", duration=4000)
-        elif len(matched) > 1: alert = dbc.Alert(f"Ambiguous name '{active_query}'. Use a more specific name or ID.", color="warning", duration=5000)
+        if not matched: toast_header, toast_icon, toast_children = "Not Found", "danger", f"Player '{active_query}' not found."
+        elif len(matched) > 1: toast_header, toast_icon, toast_children = "Ambiguous Name", "warning", f"'{active_query}' could be multiple players. Use a more specific name or ID."
         else: p_data_dict = matched[0]
+        
         if p_data_dict:
             pid, pname = p_data_dict['ID'], p_data_dict['Name']
             drafted_set, my_team_set = set(new_session['globally_drafted_player_ids']), set(new_session['user_drafted_player_ids'])
             if action_type in ['opponent', 'my_team']:
-                if pid in drafted_set: alert = dbc.Alert(f"{pname} has already been drafted.", color="info", duration=4000)
+                if pid in drafted_set: toast_header, toast_icon, toast_children = "Already Drafted", "info", f"{pname} has already been drafted."
                 else:
                     new_session['globally_drafted_player_ids'].append(pid)
                     if action_type == 'my_team':
                         new_session['user_drafted_player_ids'].append(pid)
-                        alert = dbc.Alert(f"You drafted {pname}!", color="success", duration=3000)
+                        toast_header, toast_icon, toast_children = "Draft Successful", "success", f"You drafted {pname}!"
                     else:
                         if pid in my_team_set: new_session['user_drafted_player_ids'] = [p for p in new_session['user_drafted_player_ids'] if p != pid]
-                        alert = dbc.Alert(f"Opponent drafted {pname}.", color="secondary", duration=3000)
+                        toast_header, toast_icon, toast_children = "Opponent Draft", "secondary", f"Opponent drafted {pname}."
                     is_successful_action = True
             elif action_type == 'undo':
-                if pid not in drafted_set: alert = dbc.Alert(f"{pname} was not on the draft board to undo.", color="info", duration=4000)
+                if pid not in drafted_set: toast_header, toast_icon, toast_children = "Not Found", "info", f"{pname} was not on the draft board to undo."
                 else:
                     new_session['globally_drafted_player_ids'] = [p for p in new_session['globally_drafted_player_ids'] if p != pid]
                     if pid in my_team_set: new_session['user_drafted_player_ids'] = [p for p in new_session['user_drafted_player_ids'] if p != pid]
-                    alert = dbc.Alert(f"Undo successful for {pname}.", color="info", duration=3000)
+                    toast_header, toast_icon, toast_children = "Undo Successful", "info", f"Removed {pname} from the draft board."
                     is_successful_action = True
+        
         if is_successful_action:
             if action_type in ['opponent', 'my_team']: query_out = ''
             elif action_type == 'undo': undo_out = ''
-        return new_session, alert, query_out, undo_out
+        
+        return new_session, bool(toast_children), toast_children, toast_header, toast_icon, query_out, undo_out
 
     @app.callback(Output('ga-results-display', 'children'), Input('run-ga-btn', 'n_clicks'), State('session-store', 'data'), prevent_initial_call=True)
     def run_ga_callback(n_clicks, session_data):
@@ -605,11 +612,6 @@ else:
         next_pick = None
         if best_ids: next_pick = suggest_next_best_pick(best_ids, set(session_data['user_drafted_player_ids']), curr_round, processed_id_map, ga_context['position_order'])
         return format_ga_results_display(best_ids, best_fit, ga_msgs, next_pick, processed_id_map, ga_context['position_order'], set(session_data['user_drafted_player_ids']))
-
-    @app.callback(Output('restart-draft-modal', 'is_open'), [Input('restart-draft-open-modal-btn', 'n_clicks'), Input('restart-draft-cancel-btn', 'n_clicks'), Input('restart-draft-confirm-btn', 'n_clicks')], State('restart-draft-modal', 'is_open'), prevent_initial_call=True)
-    def toggle_restart_modal(open_clicks, cancel_clicks, confirm_clicks, is_open):
-        if open_clicks or cancel_clicks or confirm_clicks: return not is_open
-        return is_open
 
     @app.callback(
         [Output('my-team-card', 'children'), Output('settings-and-actions-card', 'children'), Output('current-round-info', 'children'),
@@ -658,7 +660,7 @@ else:
                  dbc.Input(id='undo-player-query-input', placeholder='Player to Undo', className='mb-2'),
                  dbc.Button('Undo Draft', id='undo-draft-btn', color='danger', outline=True, className="w-100 mb-3"),
                  html.Hr(),
-                 dbc.Button("Restart Entire Draft", id="restart-draft-open-modal-btn", color="danger", className="w-100")])]
+                 dbc.Button("Restart Entire Draft", id="restart-draft-btn", color="danger", className="w-100")])]
         overall_picks = len(session_data['globally_drafted_player_ids'])
         curr_round = math.floor(overall_picks / picks_per_round) + 1 if picks_per_round > 0 else 1
         round_info_txt = f"Draft: Rd {curr_round} (Pick {overall_picks + 1}) | Mode: {session_data['scoring_mode']}"
