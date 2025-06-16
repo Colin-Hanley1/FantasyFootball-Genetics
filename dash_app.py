@@ -466,13 +466,13 @@ if not INITIAL_SETUP_SUCCESS:
 else:
     app.layout = dbc.Container([
         dcc.Store(id='session-store', storage_type='memory'),
-        # FIX: Removed Modal and alert Div. Added a single Toast component for all notifications.
-        dbc.Toast(id="action-toast", header="Notification", is_open=False, dismissable=True, duration=4000,
-                  icon="primary", style={"position": "fixed", "top": 10, "right": 10, "width": 350, "zIndex": 10},
-        ),
+        # FIX: The new, dedicated store for notifications
+        dcc.Store(id='notification-store', data={}),
+        dcc.Interval(id='alert-interval', disabled=True, n_intervals=0, max_intervals=1, interval=4000),
         dbc.Row(dbc.Col(html.H1("🏈 Evolve Draft: Multi-User Fantasy Football Advisor", className="text-center my-4"))),
         dbc.Row(dbc.Col(id='current-round-info', className="text-center mb-3 fw-bold fs-5")),
-        dbc.Row(dbc.Col(id='roster-update-messages-div')), # This div is only for non-toast roster update messages
+        # FIX: This single div will now be controlled by the dedicated notification callback
+        dbc.Row(dbc.Col(id='action-messages-div')),
         dbc.Row([
             dbc.Col(md=4, children=[
                 dbc.Card(id='settings-and-actions-card'),
@@ -493,113 +493,119 @@ else:
         if session_data is None: return get_initial_session_data()
         return dash.no_update
 
-    # FIX: This callback now triggers the one-click restart and outputs to the Toast
+    # FIX: This callback now outputs a notification dictionary to the notification-store
     @app.callback(
         [Output('session-store', 'data', allow_duplicate=True),
-         Output('action-toast', 'is_open', allow_duplicate=True), Output('action-toast', 'children', allow_duplicate=True),
-         Output('action-toast', 'header', allow_duplicate=True), Output('action-toast', 'icon', allow_duplicate=True)],
-        [Input('teams-slider', 'value'), Input('scoring-mode-selector', 'value'), Input('restart-draft-btn', 'n_clicks')],
-        State('session-store', 'data'), prevent_initial_call=True)
-    def handle_session_modifiers(new_team_count, selected_mode, restart_clicks, session_data):
-        if session_data is None: return dash.no_update, False, "", "", ""
-        triggered_id, new_session = ctx.triggered_id, copy.deepcopy(session_data)
-        toast_open, toast_children, toast_header, toast_icon = False, "", "", ""
+         Output('notification-store', 'data', allow_duplicate=True)],
+        [Input('teams-slider', 'value'), Input('scoring-mode-selector', 'value'), Input('restart-draft-btn', 'n_clicks'), Input('apply-roster-changes-btn', 'n_clicks')],
+        [State('session-store', 'data')] + [State(f"roster-input-{key.replace('/', '-')}", "value") for key in get_initial_session_data()['roster_structure'].keys()],
+        prevent_initial_call=True)
+    def handle_session_modifiers(new_team_count, selected_mode, restart_clicks, apply_roster_clicks, session_data, *roster_values):
+        if session_data is None: return dash.no_update, dash.no_update
+        triggered_id, new_session, notification = ctx.triggered_id, copy.deepcopy(session_data), {}
 
         if triggered_id == 'teams-slider' and new_team_count != new_session.get('picks_per_round'):
             new_session.update({'picks_per_round': new_team_count, 'globally_drafted_player_ids': [], 'user_drafted_player_ids': []})
-            toast_open, toast_header, toast_icon, toast_children = True, "Settings Changed", "info", f"League size set to {new_team_count}. Draft reset."
+            notification = {'message': f"League size set to {new_team_count}. Draft has been reset.", 'color': 'info'}
         elif triggered_id == 'scoring-mode-selector' and selected_mode != new_session.get('scoring_mode'):
             new_session.update({'scoring_mode': selected_mode, 'globally_drafted_player_ids': [], 'user_drafted_player_ids': []})
-            toast_open, toast_header, toast_icon, toast_children = True, "Settings Changed", "info", f"Scoring mode set to {selected_mode}. Draft reset."
+            notification = {'message': f"Scoring mode set to {selected_mode}. Draft has been reset.", 'color': 'info'}
         elif triggered_id == 'restart-draft-btn':
             new_session = get_initial_session_data()
-            toast_open, toast_header, toast_icon, toast_children = True, "Draft Reset", "warning", "The draft has been successfully restarted."
+            notification = {'message': "Draft has been successfully restarted.", 'color': 'warning'}
+        elif triggered_id == 'apply-roster-changes-btn':
+            new_roster, valid_update = {}, True
+            for i, key in enumerate(get_initial_session_data()['roster_structure'].keys()):
+                val = roster_values[i]
+                if val is None or not isinstance(val, int) or val < 0:
+                    notification = {'message': f"Invalid count for {key}. Must be a non-negative integer.", 'color': 'danger'}
+                    valid_update = False; break
+                new_roster[key] = val
+            if valid_update:
+                if sum(new_roster.values()) == 0:
+                    notification = {'message': "Roster cannot have zero total spots.", 'color': 'danger'}
+                else:
+                    new_session.update({'roster_structure': new_roster, 'globally_drafted_player_ids': [], 'user_drafted_player_ids': []})
+                    notification = {'message': "Roster structure updated. Draft has been reset.", 'color': 'success'}
         
-        return new_session, toast_open, toast_children, toast_header, toast_icon
+        if notification: return new_session, notification
+        return new_session, dash.no_update
 
+    # FIX: This callback also outputs to the notification-store
     @app.callback(
-        [Output('session-store', 'data', allow_duplicate=True), Output('roster-update-messages-div', 'children')],
-        Input('apply-roster-changes-btn', 'n_clicks'),
-        [State('session-store', 'data')] + [State(f"roster-input-{key.replace('/', '-')}", "value") for key in get_initial_session_data()['roster_structure'].keys()],
-        prevent_initial_call=True)
-    def handle_roster_change(n_clicks, session_data, *roster_values):
-        if n_clicks is None or session_data is None: return dash.no_update, None
-        new_roster, alert = {}, None
-        valid_update = True
-        all_roster_keys = get_initial_session_data()['roster_structure'].keys()
-        for i, key in enumerate(all_roster_keys):
-            val = roster_values[i]
-            if val is None or not isinstance(val, int) or val < 0:
-                alert = dbc.Alert(f"Invalid count for {key}. Must be a non-negative integer.", color="danger", duration=5000)
-                valid_update = False; break
-            new_roster[key] = val
-        if valid_update:
-            if sum(new_roster.values()) == 0:
-                alert = dbc.Alert("Roster cannot have zero total spots.", color="danger", duration=5000)
-            else:
-                new_session = copy.deepcopy(session_data)
-                new_session.update({'roster_structure': new_roster, 'globally_drafted_player_ids': [], 'user_drafted_player_ids': []})
-                alert = dbc.Alert("Roster structure updated. Draft has been reset.", color="success", duration=4000)
-                return new_session, alert
-        return dash.no_update, alert
-
-    @app.callback(
-        [Output('session-store', 'data', allow_duplicate=True),
-         Output('action-toast', 'is_open', allow_duplicate=True), Output('action-toast', 'children', allow_duplicate=True),
-         Output('action-toast', 'header', allow_duplicate=True), Output('action-toast', 'icon', allow_duplicate=True),
+        [Output('session-store', 'data', allow_duplicate=True), Output('notification-store', 'data', allow_duplicate=True),
          Output('player-query-input', 'value'), Output('undo-player-query-input', 'value')],
         [Input('draft-opponent-btn', 'n_clicks'), Input('draft-my-team-btn', 'n_clicks'), Input('undo-draft-btn', 'n_clicks'), Input('player-query-input', 'n_submit')],
         [State('player-query-input', 'value'), State('undo-player-query-input', 'value'), State('session-store', 'data')],
         prevent_initial_call=True)
     def handle_draft_actions(opp_clicks, my_clicks, undo_clicks, n_submit, query_val, undo_val, session_data):
         if not ctx.triggered_id or session_data is None:
-            return dash.no_update, False, "", "", "", query_val, undo_val
+            return dash.no_update, dash.no_update, query_val, undo_val
 
-        triggered_id = ctx.triggered_id
-        new_session = copy.deepcopy(session_data)
-        query_out, undo_out = query_val, undo_val
-        is_successful_action = False
-        toast_children, toast_header, toast_icon = "", "", ""
+        triggered_id, new_session, notification = ctx.triggered_id, copy.deepcopy(session_data), {}
+        query_out, undo_out, is_successful_action = query_val, undo_val, False
 
         active_query, action_type = (query_val, 'opponent') if triggered_id in ['player-query-input', 'draft-opponent-btn'] else \
                                     (query_val, 'my_team') if triggered_id == 'draft-my-team-btn' else \
                                     (undo_val, 'undo') if triggered_id == 'undo-draft-btn' else (None, None)
         if not active_query:
-            toast_header, toast_icon, toast_children = "Input Error", "danger", "Player name/ID cannot be empty."
-            return dash.no_update, True, toast_children, toast_header, toast_icon, query_val, undo_val
+            notification = {'message': "Player name/ID cannot be empty.", 'color': 'warning'}
+            return dash.no_update, notification, query_val, undo_val
 
         matched, p_data_dict = find_player_flexible(active_query, MASTER_PLAYER_POOL_RAW), None
-        if not matched: toast_header, toast_icon, toast_children = "Not Found", "danger", f"Player '{active_query}' not found."
-        elif len(matched) > 1: toast_header, toast_icon, toast_children = "Ambiguous Name", "warning", f"'{active_query}' could be multiple players. Use a more specific name or ID."
+        if not matched: notification = {'message': f"Player '{active_query}' not found.", 'color': 'danger'}
+        elif len(matched) > 1: notification = {'message': f"Ambiguous name '{active_query}'. Use a more specific name or ID.", 'color': 'warning'}
         else: p_data_dict = matched[0]
         
         if p_data_dict:
             pid, pname = p_data_dict['ID'], p_data_dict['Name']
             drafted_set, my_team_set = set(new_session['globally_drafted_player_ids']), set(new_session['user_drafted_player_ids'])
             if action_type in ['opponent', 'my_team']:
-                if pid in drafted_set: toast_header, toast_icon, toast_children = "Already Drafted", "info", f"{pname} has already been drafted."
+                if pid in drafted_set: notification = {'message': f"{pname} has already been drafted.", 'color': 'info'}
                 else:
                     new_session['globally_drafted_player_ids'].append(pid)
                     if action_type == 'my_team':
-                        new_session['user_drafted_player_ids'].append(pid)
-                        toast_header, toast_icon, toast_children = "Draft Successful", "success", f"You drafted {pname}!"
+                        new_session['user_drafted_player_ids'].append(pid); notification = {'message': f"You drafted {pname}!", 'color': 'success'}
                     else:
                         if pid in my_team_set: new_session['user_drafted_player_ids'] = [p for p in new_session['user_drafted_player_ids'] if p != pid]
-                        toast_header, toast_icon, toast_children = "Opponent Draft", "secondary", f"Opponent drafted {pname}."
+                        notification = {'message': f"Opponent drafted {pname}.", 'color': 'secondary'}
                     is_successful_action = True
             elif action_type == 'undo':
-                if pid not in drafted_set: toast_header, toast_icon, toast_children = "Not Found", "info", f"{pname} was not on the draft board to undo."
+                if pid not in drafted_set: notification = {'message': f"{pname} was not on the draft board to undo.", 'color': 'info'}
                 else:
                     new_session['globally_drafted_player_ids'] = [p for p in new_session['globally_drafted_player_ids'] if p != pid]
                     if pid in my_team_set: new_session['user_drafted_player_ids'] = [p for p in new_session['user_drafted_player_ids'] if p != pid]
-                    toast_header, toast_icon, toast_children = "Undo Successful", "info", f"Removed {pname} from the draft board."
+                    notification = {'message': f"Removed {pname} from the draft board.", 'color': 'info'}
                     is_successful_action = True
         
         if is_successful_action:
             if action_type in ['opponent', 'my_team']: query_out = ''
             elif action_type == 'undo': undo_out = ''
         
-        return new_session, bool(toast_children), toast_children, toast_header, toast_icon, query_out, undo_out
+        return new_session, notification, query_out, undo_out
+
+    # FIX: New callback to manage displaying the alert from the notification-store
+    @app.callback(
+        [Output('action-messages-div', 'children'),
+         Output('alert-interval', 'disabled')],
+        Input('notification-store', 'data'),
+        prevent_initial_call=True
+    )
+    def display_notification(notification_data):
+        if notification_data and notification_data.get('message'):
+            message = notification_data['message']
+            color = notification_data.get('color', 'primary')
+            return dbc.Alert(message, color=color), False
+        return None, True
+
+    # FIX: New callback to clear the alert after the interval completes
+    @app.callback(
+        Output('action-messages-div', 'children', allow_duplicate=True),
+        Input('alert-interval', 'n_intervals'),
+        prevent_initial_call=True
+    )
+    def clear_alert(n_intervals):
+        return None
 
     @app.callback(Output('ga-results-display', 'children'), Input('run-ga-btn', 'n_clicks'), State('session-store', 'data'), prevent_initial_call=True)
     def run_ga_callback(n_clicks, session_data):
