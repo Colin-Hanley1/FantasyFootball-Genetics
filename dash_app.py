@@ -50,11 +50,7 @@ REACH_PENALTY_SCALER = 0.0
 # --- Data Loading and Session Management ---
 
 def load_master_player_pool_from_csv(filename=DEFAULT_CSV_FILENAME):
-    """
-    Loads the raw player data from the CSV, now including Superflex ADP columns.
-    """
     player_pool_list = []
-    # FIX: Added Superflex ADP columns to the expected headers
     expected_headers = ["ID", "Name", "Position", "PPRPoints", "PPRADP", "STDPoints", "STDADP", "STDSFADP", "PPRSFADP", "ByeWeek", "Team"]
     try:
         with open(filename, mode='r', newline='', encoding='utf-8') as csvfile:
@@ -65,7 +61,6 @@ def load_master_player_pool_from_csv(filename=DEFAULT_CSV_FILENAME):
                 return []
             for row_num, row in enumerate(reader, 1):
                 try:
-                    # FIX: Read new Superflex ADP columns into the raw data dictionary
                     player_data = {
                         "ID": int(row["ID"]),
                         "Name": row["Name"],
@@ -89,11 +84,16 @@ def load_master_player_pool_from_csv(filename=DEFAULT_CSV_FILENAME):
     return player_pool_list
 
 def get_initial_session_data():
+    """
+    Returns a dictionary with the default state for a new user session.
+    FIX: Added "SUPERFLEX" to the default roster structure.
+    """
     return {
         'scoring_mode': "PPR",
         'picks_per_round': 8,
         'roster_structure': {
             "QB": 1, "RB": 2, "WR": 2, "TE": 1, "W/R/T": 1,
+            "SUPERFLEX": 0, # <-- ADDED THIS LINE
             "BN_SUPERFLEX": 1, "BN_FLX": 4
         },
         'globally_drafted_player_ids': [],
@@ -116,14 +116,12 @@ def get_processed_player_pool_for_session(session_data):
     picks_per_round = session_data.get('picks_per_round', 8)
     roster_structure = session_data.get('roster_structure', {})
 
-    # Check if superflex mode should be active
     superflex_active = is_superflex_mode(roster_structure)
 
     processed_pool_tuples = []
     for p_raw in MASTER_PLAYER_POOL_RAW:
         active_points = p_raw['PPRPoints'] if scoring_mode == "PPR" else p_raw['STDPoints']
         
-        # FIX: Dynamically select the correct ADP column
         if superflex_active:
             active_adp = p_raw['PPRSFADP'] if scoring_mode == "PPR" else p_raw['STDSFADP']
         else:
@@ -132,7 +130,6 @@ def get_processed_player_pool_for_session(session_data):
         ppg = active_points / GAMES_IN_SEASON if GAMES_IN_SEASON > 0 else 0
         calc_round = max(1, math.ceil(active_adp / picks_per_round)) if picks_per_round > 0 else 1
         
-        # Add all data points to the tuple for future access
         processed_pool_tuples.append(
             (p_raw['ID'], p_raw['Name'], p_raw['Position'], ppg, calc_round, p_raw['ByeWeek'], p_raw['Team'])
         )
@@ -626,7 +623,7 @@ else:
     def display_notification(notification_data):
         if notification_data and notification_data.get('message'):
             message, color = notification_data['message'], notification_data.get('color', 'primary')
-            return dbc.Alert(message, color=color, duration=4000), False
+            return dbc.Alert(message, color=color, dismissable=True, duration=4000), False
         return None, True
 
     @app.callback(
@@ -695,12 +692,10 @@ else:
                  dbc.Button('Undo Draft', id='undo-draft-btn', color='danger', outline=True, className="w-100 mb-3"),
                  html.Hr(),
                  dbc.Button("Restart Entire Draft", id="restart-draft-btn", color="danger", className="w-100")])]
-        
         superflex_indicator = " | SF Mode" if is_superflex_mode(roster_structure) else ""
         overall_picks = len(session_data['globally_drafted_player_ids'])
         curr_round = math.floor(overall_picks / picks_per_round) + 1 if picks_per_round > 0 else 1
         round_info_txt = f"Draft: Rd {curr_round} (Pick {overall_picks + 1}) | Mode: {session_data['scoring_mode']}{superflex_indicator}"
-        
         drafted_pids, user_pids = set(session_data['globally_drafted_player_ids']), set(session_data['user_drafted_player_ids'])
         drafted_list_tuples = sorted([processed_id_map[pid] for pid in drafted_pids if pid in processed_id_map], key=lambda x: session_data['globally_drafted_player_ids'].index(x[0]))
         drafted_disp_items = [dbc.ListGroupItem([f"{i+1}. {p_data[1]} ({p_data[2]})", dbc.Badge("You", color="success", pill=True, className="ms-auto") if p_data[0] in user_pids else None], className="d-flex justify-content-between align-items-center", style={'fontSize': '0.85rem'}) for i, p_data in enumerate(drafted_list_tuples)]
