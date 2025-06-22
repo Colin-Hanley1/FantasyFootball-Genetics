@@ -50,8 +50,12 @@ REACH_PENALTY_SCALER = 0.0
 # --- Data Loading and Session Management ---
 
 def load_master_player_pool_from_csv(filename=DEFAULT_CSV_FILENAME):
+    """
+    Loads the raw player data from the CSV, now including Superflex ADP columns.
+    """
     player_pool_list = []
-    expected_headers = ["ID", "Name", "Position", "PPRPoints", "PPRADP", "STDPoints", "STDADP", "ByeWeek"]
+    # FIX: Added Superflex ADP columns to the expected headers
+    expected_headers = ["ID", "Name", "Position", "PPRPoints", "PPRADP", "STDPoints", "STDADP", "STDSFADP", "PPRSFADP", "ByeWeek", "Team"]
     try:
         with open(filename, mode='r', newline='', encoding='utf-8') as csvfile:
             reader = csv.DictReader(csvfile)
@@ -61,6 +65,7 @@ def load_master_player_pool_from_csv(filename=DEFAULT_CSV_FILENAME):
                 return []
             for row_num, row in enumerate(reader, 1):
                 try:
+                    # FIX: Read new Superflex ADP columns into the raw data dictionary
                     player_data = {
                         "ID": int(row["ID"]),
                         "Name": row["Name"],
@@ -69,7 +74,10 @@ def load_master_player_pool_from_csv(filename=DEFAULT_CSV_FILENAME):
                         "STDPoints": float(row["STDPoints"]),
                         "PPRADP": int(float(row.get("PPRADP") or 999)),
                         "STDADP": int(float(row.get("STDADP") or 999)),
-                        "ByeWeek": int(row["ByeWeek"]) if row["ByeWeek"] and row["ByeWeek"].strip() else 0
+                        "PPRSFADP": int(float(row.get("PPRSFADP") or 999)),
+                        "STDSFADP": int(float(row.get("STDSFADP") or 999)),
+                        "ByeWeek": int(row["ByeWeek"]) if row["ByeWeek"] and row["ByeWeek"].strip() else 0,
+                        "Team": row.get("Team", "N/A")
                     }
                     player_pool_list.append(player_data)
                 except (KeyError, ValueError) as e:
@@ -92,17 +100,41 @@ def get_initial_session_data():
         'user_drafted_player_ids': [],
     }
 
+def is_superflex_mode(roster_structure):
+    """Checks if the current roster settings trigger Superflex mode."""
+    return (
+        roster_structure.get("SUPERFLEX", 0) > 0 or
+        roster_structure.get("QB", 0) >= 2
+    )
+
 def get_processed_player_pool_for_session(session_data):
+    """
+    Processes raw data based on session settings, now dynamically selecting ADP
+    based on whether Superflex mode is active.
+    """
     scoring_mode = session_data.get('scoring_mode', 'PPR')
     picks_per_round = session_data.get('picks_per_round', 8)
+    roster_structure = session_data.get('roster_structure', {})
+
+    # Check if superflex mode should be active
+    superflex_active = is_superflex_mode(roster_structure)
+
     processed_pool_tuples = []
     for p_raw in MASTER_PLAYER_POOL_RAW:
         active_points = p_raw['PPRPoints'] if scoring_mode == "PPR" else p_raw['STDPoints']
-        active_adp = p_raw['PPRADP'] if scoring_mode == "PPR" else p_raw['STDADP']
+        
+        # FIX: Dynamically select the correct ADP column
+        if superflex_active:
+            active_adp = p_raw['PPRSFADP'] if scoring_mode == "PPR" else p_raw['STDSFADP']
+        else:
+            active_adp = p_raw['PPRADP'] if scoring_mode == "PPR" else p_raw['STDADP']
+
         ppg = active_points / GAMES_IN_SEASON if GAMES_IN_SEASON > 0 else 0
         calc_round = max(1, math.ceil(active_adp / picks_per_round)) if picks_per_round > 0 else 1
+        
+        # Add all data points to the tuple for future access
         processed_pool_tuples.append(
-            (p_raw['ID'], p_raw['Name'], p_raw['Position'], ppg, calc_round, p_raw['ByeWeek'], p_raw['PPRPoints'], p_raw['PPRADP'], p_raw['STDPoints'], p_raw['STDADP'])
+            (p_raw['ID'], p_raw['Name'], p_raw['Position'], ppg, calc_round, p_raw['ByeWeek'], p_raw['Team'])
         )
     processed_id_map = {p[0]: p for p in processed_pool_tuples}
     return processed_pool_tuples, processed_id_map
@@ -226,37 +258,22 @@ def find_player_flexible(query_str, master_pool_raw):
 
 # --- Main GA Logic ---
 def prepare_for_ga_run(session_data, processed_player_pool, processed_id_map):
-    """
-    Assigns drafted players to roster slots based on a logical order.
-    FIX: This function now handles bench QBs by prioritizing them for the BN_SUPERFLEX spot.
-    """
     roster_structure = session_data['roster_structure']
     user_drafted_ids = set(session_data['user_drafted_player_ids'])
-    
     position_order, total_roster_spots = get_roster_derived_details(roster_structure)
     available_slots = list(range(total_roster_spots))
-    
     user_player_data = [processed_id_map[pid] for pid in user_drafted_ids if pid in processed_id_map]
     user_slot_assignments = {}
-
-    # Separate players into lists for each position group, sorted by PPG
     player_groups = {}
     for p_data in user_player_data:
         player_groups.setdefault(p_data[2], []).append(p_data)
     for pos in player_groups:
         player_groups[pos].sort(key=lambda x: x[3], reverse=True)
-
-    # --- Assign starters first ---
     starter_slots = [(i, p_type) for i, p_type in enumerate(position_order) if not p_type.startswith("BN_")]
     for slot_idx, slot_type in starter_slots:
-        
         best_player_to_assign = None
-        
-        # For dedicated slots (QB, RB, WR, TE)
         if slot_type in player_groups and player_groups[slot_type]:
             best_player_to_assign = player_groups[slot_type][0]
-        
-        # For FLEX slots, find the best available player from eligible positions
         elif slot_type in FLEX_ELIGIBILITY:
             candidate_players = []
             for pos in FLEX_ELIGIBILITY[slot_type]:
@@ -264,46 +281,32 @@ def prepare_for_ga_run(session_data, processed_player_pool, processed_id_map):
                     candidate_players.append(player_groups[pos][0])
             if candidate_players:
                 best_player_to_assign = max(candidate_players, key=lambda p: p[3])
-        
         if best_player_to_assign:
             user_slot_assignments[best_player_to_assign[0]] = slot_idx
             available_slots.remove(slot_idx)
-            player_groups[best_player_to_assign[2]].pop(0) # Remove assigned player
-
-    # --- Assign bench players with new constraints ---
+            player_groups[best_player_to_assign[2]].pop(0)
     remaining_players = []
     for pos_group in player_groups.values():
         remaining_players.extend(pos_group)
-    remaining_players.sort(key=lambda x: x[3], reverse=True) # Sort all remaining by PPG
-
+    remaining_players.sort(key=lambda x: x[3], reverse=True)
     remaining_qbs = [p for p in remaining_players if p[2] == 'QB']
     other_remaining_players = [p for p in remaining_players if p[2] != 'QB']
-
-    # Get available bench slots and separate them
     all_bench_slots = [i for i in available_slots if position_order[i].startswith("BN_")]
     bn_superflex_slots = [i for i in all_bench_slots if position_order[i] == "BN_SUPERFLEX"]
     other_bench_slots = [i for i in all_bench_slots if position_order[i] != "BN_SUPERFLEX"]
-
-    # 1. Assign QBs ONLY to available BN_SUPERFLEX spots
     for qb in remaining_qbs:
         if bn_superflex_slots:
             slot_idx = bn_superflex_slots.pop(0)
             user_slot_assignments[qb[0]] = slot_idx
-    
-    # 2. Assign all other players to the remaining bench spots
     all_remaining_bench_slots = other_bench_slots + bn_superflex_slots
     all_remaining_bench_slots.sort()
-
     for player in other_remaining_players:
         if all_remaining_bench_slots:
             slot_idx = all_remaining_bench_slots.pop(0)
             user_slot_assignments[player[0]] = slot_idx
-
-    # --- Final Context for GA ---
     globally_drafted_ids = set(session_data['globally_drafted_player_ids'])
     available_pool = [p for p in processed_player_pool if p[0] not in globally_drafted_ids]
     players_by_pos = {pos: sorted([p for p in available_pool if p[2] == pos], key=lambda x: (x[4], -x[3])) for pos in set(p[2] for p in available_pool)}
-
     return {"available_pool": available_pool, "players_by_pos": players_by_pos, "user_slot_assignments": user_slot_assignments, "position_order": position_order, "total_roster_spots": total_roster_spots}
 
 def genetic_algorithm_adp_lineup(curr_round, ga_context, processed_id_map, session_data):
@@ -347,7 +350,6 @@ def genetic_algorithm_adp_lineup(curr_round, ga_context, processed_id_map, sessi
             if not is_valid: return -PENALTY_VIOLATION * 10, 0, set(), valid_player_data_for_checks
         player_ids_for_dup_check = [p[0] for p in valid_player_data_for_checks]
         if len(set(player_ids_for_dup_check)) != len(player_ids_for_dup_check): return -PENALTY_VIOLATION * 5, 0, set(), valid_player_data_for_checks
-        
         raw_ppg_sum, fitness_ppg_component, bench_value_score = 0, 0, 0
         for i, p_data_calc in enumerate(lineup_player_objects):
             if p_data_calc is None: continue
@@ -359,7 +361,6 @@ def genetic_algorithm_adp_lineup(curr_round, ga_context, processed_id_map, sessi
                 fitness_ppg_component += ppg * BENCH_PPG_MULTIPLIER
                 bench_value_score += ppg * adp_round
         fitness_score = fitness_ppg_component + (bench_value_score * BENCH_VALUE_SCALER)
-        
         bench_adp_mismanagement_penalty = 0
         starters_adp_data = [p[4] for i, p in enumerate(lineup_player_objects) if p and not position_order[i].startswith("BN_")]
         if starters_adp_data:
@@ -372,11 +373,9 @@ def genetic_algorithm_adp_lineup(curr_round, ga_context, processed_id_map, sessi
                     if bench_p_adp_rnd <= 3 and min_s_adp_rnd_val > (bench_p_adp_rnd + STARTER_ADP_WEAKNESS_THRESHOLD):
                         bench_adp_mismanagement_penalty += (PENALTY_VIOLATION * EARLY_ROUND_ADP_BENCH_PENALTY * (4 - bench_p_adp_rnd) / 5.0)
         fitness_score -= bench_adp_mismanagement_penalty
-        
         bye_weeks_on_roster = [p[5] for p in valid_player_data_for_checks if p[5] is not None and 0 < p[5] < 20]
         num_bye_week_conflicts = sum(count - 1 for count in Counter(bye_weeks_on_roster).values() if count >= 2)
         if num_bye_week_conflicts > 0: fitness_score -= (PENALTY_VIOLATION * BYE_WEEK_CONFLICT_PENALTY_FACTOR * num_bye_week_conflicts)
-        
         missing_backup_penalty_points = 0
         core_starter_positions_defined = {slot for slot, count in roster_structure.items() if count > 0 and not slot.startswith("BN_") and slot not in FLEX_ELIGIBILITY}
         if core_starter_positions_defined:
@@ -385,20 +384,16 @@ def genetic_algorithm_adp_lineup(curr_round, ga_context, processed_id_map, sessi
                 if any(p and not position_order[i].startswith("BN_") and p[2] == core_pos for i, p in enumerate(lineup_player_objects)) and bench_player_actual_positions[core_pos] == 0:
                     missing_backup_penalty_points += 1
             if missing_backup_penalty_points > 0: fitness_score -= (PENALTY_VIOLATION * BACKUP_POSITION_PENALTY_SCALER * missing_backup_penalty_points)
-        
         if total_roster_spots > 0:
             draft_round_threshold = total_roster_spots + 2
             undraftable_adp_penalty = sum(p[4] - draft_round_threshold for p in valid_player_data_for_checks if p[4] > draft_round_threshold)
             if undraftable_adp_penalty > 0: fitness_score -= (PENALTY_VIOLATION * UNDRAFTABLE_ADP_PENALTY_SCALER * undraftable_adp_penalty)
-        
         total_reach_penalty_points = sum(p[4] - current_draft_round - ALLOWED_REACH_ROUNDS for p in valid_player_data_for_checks if (p[4] - current_draft_round) > ALLOWED_REACH_ROUNDS)
         if total_reach_penalty_points > 0: fitness_score -= (PENALTY_VIOLATION * REACH_PENALTY_SCALER * total_reach_penalty_points)
-        
         player_adp_rounds_in_lineup = [p[4] for p in valid_player_data_for_checks]
         adp_round_counts = Counter(player_adp_rounds_in_lineup)
         num_future_round_stacking_violations = sum(count - 1 for adp_r, count in adp_round_counts.items() if count > 1 and adp_r >= current_draft_round)
         if num_future_round_stacking_violations > 0: fitness_score -= (PENALTY_VIOLATION * num_future_round_stacking_violations * 1.5)
-        
         return fitness_score, raw_ppg_sum, set(player_adp_rounds_in_lineup), valid_player_data_for_checks
 
     def repair_lineup(lineup_ids):
@@ -631,7 +626,7 @@ else:
     def display_notification(notification_data):
         if notification_data and notification_data.get('message'):
             message, color = notification_data['message'], notification_data.get('color', 'primary')
-            return dbc.Alert(message, color=color, dismissable=True, duration=4000), False
+            return dbc.Alert(message, color=color, duration=4000), False
         return None, True
 
     @app.callback(
@@ -700,9 +695,12 @@ else:
                  dbc.Button('Undo Draft', id='undo-draft-btn', color='danger', outline=True, className="w-100 mb-3"),
                  html.Hr(),
                  dbc.Button("Restart Entire Draft", id="restart-draft-btn", color="danger", className="w-100")])]
+        
+        superflex_indicator = " | SF Mode" if is_superflex_mode(roster_structure) else ""
         overall_picks = len(session_data['globally_drafted_player_ids'])
         curr_round = math.floor(overall_picks / picks_per_round) + 1 if picks_per_round > 0 else 1
-        round_info_txt = f"Draft: Rd {curr_round} (Pick {overall_picks + 1}) | Mode: {session_data['scoring_mode']}"
+        round_info_txt = f"Draft: Rd {curr_round} (Pick {overall_picks + 1}) | Mode: {session_data['scoring_mode']}{superflex_indicator}"
+        
         drafted_pids, user_pids = set(session_data['globally_drafted_player_ids']), set(session_data['user_drafted_player_ids'])
         drafted_list_tuples = sorted([processed_id_map[pid] for pid in drafted_pids if pid in processed_id_map], key=lambda x: session_data['globally_drafted_player_ids'].index(x[0]))
         drafted_disp_items = [dbc.ListGroupItem([f"{i+1}. {p_data[1]} ({p_data[2]})", dbc.Badge("You", color="success", pill=True, className="ms-auto") if p_data[0] in user_pids else None], className="d-flex justify-content-between align-items-center", style={'fontSize': '0.85rem'}) for i, p_data in enumerate(drafted_list_tuples)]
