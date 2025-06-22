@@ -18,8 +18,9 @@ DEFAULT_CSV_FILENAME = "player_pool.csv"
 GA_LOG_FILENAME = "ga_training_log.csv"
 
 # --- Roster Configuration (Flex Eligibility is a global constant) ---
+# FIX: Renamed "W/R/T" to "Flex" for clarity
 FLEX_ELIGIBILITY = {
-    "W/R/T": ("WR", "RB", "TE"), "W/R": ("WR", "RB"), "R/T": ("RB", "TE"),
+    "FLEX": ("WR", "RB", "TE"), "W/R": ("WR", "RB"), "R/T": ("RB", "TE"),
     "SUPERFLEX": ("QB", "WR", "RB", "TE"), "BN_SUPERFLEX": ("QB", "WR", "RB", "TE"),
     "BN_FLX": ("WR", "RB", "TE")
 }
@@ -86,14 +87,14 @@ def load_master_player_pool_from_csv(filename=DEFAULT_CSV_FILENAME):
 def get_initial_session_data():
     """
     Returns a dictionary with the default state for a new user session.
-    FIX: Added "SUPERFLEX" to the default roster structure.
+    FIX: Renamed "W/R/T" to "Flex" in the default roster structure.
     """
     return {
         'scoring_mode': "PPR",
         'picks_per_round': 8,
         'roster_structure': {
-            "QB": 1, "RB": 2, "WR": 2, "TE": 1, "W/R/T": 1,
-            "SUPERFLEX": 0, # <-- ADDED THIS LINE
+            "QB": 1, "RB": 2, "WR": 2, "TE": 1, "FLEX": 1,
+            "SUPERFLEX": 0,
             "BN_SUPERFLEX": 1, "BN_FLX": 4
         },
         'globally_drafted_player_ids': [],
@@ -121,7 +122,7 @@ def get_processed_player_pool_for_session(session_data):
     processed_pool_tuples = []
     for p_raw in MASTER_PLAYER_POOL_RAW:
         active_points = p_raw['PPRPoints'] if scoring_mode == "PPR" else p_raw['STDPoints']
-        
+
         if superflex_active:
             active_adp = p_raw['PPRSFADP'] if scoring_mode == "PPR" else p_raw['STDSFADP']
         else:
@@ -129,7 +130,7 @@ def get_processed_player_pool_for_session(session_data):
 
         ppg = active_points / GAMES_IN_SEASON if GAMES_IN_SEASON > 0 else 0
         calc_round = max(1, math.ceil(active_adp / picks_per_round)) if picks_per_round > 0 else 1
-        
+
         processed_pool_tuples.append(
             (p_raw['ID'], p_raw['Name'], p_raw['Position'], ppg, calc_round, p_raw['ByeWeek'], p_raw['Team'])
         )
@@ -137,10 +138,14 @@ def get_processed_player_pool_for_session(session_data):
     return processed_pool_tuples, processed_id_map
 
 def get_roster_derived_details(roster_structure):
+    """
+    Calculates position order and total spots from a given roster structure.
+    FIX: Renamed "W/R/T" to "Flex" in the starter display order.
+    """
     position_order, total_spots = [], 0
     starters = {k: v for k, v in roster_structure.items() if not k.startswith("BN_")}
     bench = {k: v for k, v in roster_structure.items() if k.startswith("BN_")}
-    starter_display_order = ["QB", "RB", "WR", "TE", "W/R/T", "W/R", "R/T", "SUPERFLEX"]
+    starter_display_order = ["QB", "RB", "WR", "TE", "FLEX", "W/R", "R/T", "SUPERFLEX"]
     sorted_starters = sorted(
         starters.items(),
         key=lambda item: starter_display_order.index(item[0]) if item[0] in starter_display_order else float('inf')
