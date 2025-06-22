@@ -34,7 +34,9 @@ MUTATION_RATE = 0.2
 CROSSOVER_RATE = 0.8
 TOURNAMENT_SIZE = 5
 PENALTY_VIOLATION = 10000
-STARTER_PPG_MULTIPLIER = 5
+STARTER_PPG_MULTIPLIER = 3.0
+BENCH_PPG_MULTIPLIER = 1.5
+BENCH_VALUE_SCALER = 0.1
 BENCH_ADP_PENALTY_SCALER = 1
 STARTER_ADP_WEAKNESS_THRESHOLD = 2
 EARLY_ROUND_ADP_BENCH_PENALTY = 0.5
@@ -224,40 +226,84 @@ def find_player_flexible(query_str, master_pool_raw):
 
 # --- Main GA Logic ---
 def prepare_for_ga_run(session_data, processed_player_pool, processed_id_map):
+    """
+    Assigns drafted players to roster slots based on a logical order.
+    FIX: This function now handles bench QBs by prioritizing them for the BN_SUPERFLEX spot.
+    """
     roster_structure = session_data['roster_structure']
-    globally_drafted_ids = set(session_data['globally_drafted_player_ids'])
     user_drafted_ids = set(session_data['user_drafted_player_ids'])
+    
     position_order, total_roster_spots = get_roster_derived_details(roster_structure)
-    available_pool = [p for p in processed_player_pool if p[0] not in globally_drafted_ids]
-    players_by_pos = {pos: sorted([p for p in available_pool if p[2] == pos], key=lambda x: (x[4], -x[3])) for pos in set(p[2] for p in available_pool)}
+    available_slots = list(range(total_roster_spots))
+    
     user_player_data = [processed_id_map[pid] for pid in user_drafted_ids if pid in processed_id_map]
     user_slot_assignments = {}
-    available_slots_indices = list(range(total_roster_spots))
-    sorted_user_players = sorted(user_player_data, key=lambda x: x[4])
-    processed_pids_for_assignment = set()
-    for p_data in sorted_user_players:
-        player_id, _, actual_player_pos, _, _, _, _, _, _, _ = p_data
-        if player_id in processed_pids_for_assignment: continue
-        assigned_this_player = False
-        for slot_idx in sorted(list(available_slots_indices)):
-            slot_type = position_order[slot_idx]
-            if not slot_type.startswith("BN_") and slot_type == actual_player_pos:
-                user_slot_assignments[player_id] = slot_idx; available_slots_indices.remove(slot_idx); processed_pids_for_assignment.add(player_id); assigned_this_player = True; break
-        if assigned_this_player: continue
-        for slot_idx in sorted(list(available_slots_indices)):
-            slot_type = position_order[slot_idx]
-            if not slot_type.startswith("BN_") and slot_type in FLEX_ELIGIBILITY and actual_player_pos in FLEX_ELIGIBILITY[slot_type]:
-                user_slot_assignments[player_id] = slot_idx; available_slots_indices.remove(slot_idx); processed_pids_for_assignment.add(player_id); assigned_this_player = True; break
-        if assigned_this_player: continue
-        for slot_idx in sorted(list(available_slots_indices)):
-            slot_type = position_order[slot_idx]
-            if slot_type.startswith("BN_") and slot_type == "BN_" + actual_player_pos:
-                user_slot_assignments[player_id] = slot_idx; available_slots_indices.remove(slot_idx); processed_pids_for_assignment.add(player_id); assigned_this_player = True; break
-        if assigned_this_player: continue
-        for slot_idx in sorted(list(available_slots_indices)):
-            slot_type = position_order[slot_idx]
-            if slot_type.startswith("BN_") and slot_type in FLEX_ELIGIBILITY and actual_player_pos in FLEX_ELIGIBILITY[slot_type]:
-                user_slot_assignments[player_id] = slot_idx; available_slots_indices.remove(slot_idx); processed_pids_for_assignment.add(player_id); assigned_this_player = True; break
+
+    # Separate players into lists for each position group, sorted by PPG
+    player_groups = {}
+    for p_data in user_player_data:
+        player_groups.setdefault(p_data[2], []).append(p_data)
+    for pos in player_groups:
+        player_groups[pos].sort(key=lambda x: x[3], reverse=True)
+
+    # --- Assign starters first ---
+    starter_slots = [(i, p_type) for i, p_type in enumerate(position_order) if not p_type.startswith("BN_")]
+    for slot_idx, slot_type in starter_slots:
+        
+        best_player_to_assign = None
+        
+        # For dedicated slots (QB, RB, WR, TE)
+        if slot_type in player_groups and player_groups[slot_type]:
+            best_player_to_assign = player_groups[slot_type][0]
+        
+        # For FLEX slots, find the best available player from eligible positions
+        elif slot_type in FLEX_ELIGIBILITY:
+            candidate_players = []
+            for pos in FLEX_ELIGIBILITY[slot_type]:
+                if pos in player_groups and player_groups[pos]:
+                    candidate_players.append(player_groups[pos][0])
+            if candidate_players:
+                best_player_to_assign = max(candidate_players, key=lambda p: p[3])
+        
+        if best_player_to_assign:
+            user_slot_assignments[best_player_to_assign[0]] = slot_idx
+            available_slots.remove(slot_idx)
+            player_groups[best_player_to_assign[2]].pop(0) # Remove assigned player
+
+    # --- Assign bench players with new constraints ---
+    remaining_players = []
+    for pos_group in player_groups.values():
+        remaining_players.extend(pos_group)
+    remaining_players.sort(key=lambda x: x[3], reverse=True) # Sort all remaining by PPG
+
+    remaining_qbs = [p for p in remaining_players if p[2] == 'QB']
+    other_remaining_players = [p for p in remaining_players if p[2] != 'QB']
+
+    # Get available bench slots and separate them
+    all_bench_slots = [i for i in available_slots if position_order[i].startswith("BN_")]
+    bn_superflex_slots = [i for i in all_bench_slots if position_order[i] == "BN_SUPERFLEX"]
+    other_bench_slots = [i for i in all_bench_slots if position_order[i] != "BN_SUPERFLEX"]
+
+    # 1. Assign QBs ONLY to available BN_SUPERFLEX spots
+    for qb in remaining_qbs:
+        if bn_superflex_slots:
+            slot_idx = bn_superflex_slots.pop(0)
+            user_slot_assignments[qb[0]] = slot_idx
+    
+    # 2. Assign all other players to the remaining bench spots
+    all_remaining_bench_slots = other_bench_slots + bn_superflex_slots
+    all_remaining_bench_slots.sort()
+
+    for player in other_remaining_players:
+        if all_remaining_bench_slots:
+            slot_idx = all_remaining_bench_slots.pop(0)
+            user_slot_assignments[player[0]] = slot_idx
+
+    # --- Final Context for GA ---
+    globally_drafted_ids = set(session_data['globally_drafted_player_ids'])
+    available_pool = [p for p in processed_player_pool if p[0] not in globally_drafted_ids]
+    players_by_pos = {pos: sorted([p for p in available_pool if p[2] == pos], key=lambda x: (x[4], -x[3])) for pos in set(p[2] for p in available_pool)}
+
     return {"available_pool": available_pool, "players_by_pos": players_by_pos, "user_slot_assignments": user_slot_assignments, "position_order": position_order, "total_roster_spots": total_roster_spots}
 
 def genetic_algorithm_adp_lineup(curr_round, ga_context, processed_id_map, session_data):
@@ -301,13 +347,19 @@ def genetic_algorithm_adp_lineup(curr_round, ga_context, processed_id_map, sessi
             if not is_valid: return -PENALTY_VIOLATION * 10, 0, set(), valid_player_data_for_checks
         player_ids_for_dup_check = [p[0] for p in valid_player_data_for_checks]
         if len(set(player_ids_for_dup_check)) != len(player_ids_for_dup_check): return -PENALTY_VIOLATION * 5, 0, set(), valid_player_data_for_checks
-        raw_ppg_sum, fitness_ppg_component = 0, 0
+        
+        raw_ppg_sum, fitness_ppg_component, bench_value_score = 0, 0, 0
         for i, p_data_calc in enumerate(lineup_player_objects):
             if p_data_calc is None: continue
-            ppg, is_starter = p_data_calc[3], not position_order[i].startswith("BN_")
+            ppg, adp_round = p_data_calc[3], p_data_calc[4]
             raw_ppg_sum += ppg
-            fitness_ppg_component += (ppg * STARTER_PPG_MULTIPLIER) if is_starter else ppg
-        fitness_score = fitness_ppg_component
+            if not position_order[i].startswith("BN_"):
+                fitness_ppg_component += ppg * STARTER_PPG_MULTIPLIER
+            else:
+                fitness_ppg_component += ppg * BENCH_PPG_MULTIPLIER
+                bench_value_score += ppg * adp_round
+        fitness_score = fitness_ppg_component + (bench_value_score * BENCH_VALUE_SCALER)
+        
         bench_adp_mismanagement_penalty = 0
         starters_adp_data = [p[4] for i, p in enumerate(lineup_player_objects) if p and not position_order[i].startswith("BN_")]
         if starters_adp_data:
@@ -320,9 +372,11 @@ def genetic_algorithm_adp_lineup(curr_round, ga_context, processed_id_map, sessi
                     if bench_p_adp_rnd <= 3 and min_s_adp_rnd_val > (bench_p_adp_rnd + STARTER_ADP_WEAKNESS_THRESHOLD):
                         bench_adp_mismanagement_penalty += (PENALTY_VIOLATION * EARLY_ROUND_ADP_BENCH_PENALTY * (4 - bench_p_adp_rnd) / 5.0)
         fitness_score -= bench_adp_mismanagement_penalty
+        
         bye_weeks_on_roster = [p[5] for p in valid_player_data_for_checks if p[5] is not None and 0 < p[5] < 20]
         num_bye_week_conflicts = sum(count - 1 for count in Counter(bye_weeks_on_roster).values() if count >= 2)
         if num_bye_week_conflicts > 0: fitness_score -= (PENALTY_VIOLATION * BYE_WEEK_CONFLICT_PENALTY_FACTOR * num_bye_week_conflicts)
+        
         missing_backup_penalty_points = 0
         core_starter_positions_defined = {slot for slot, count in roster_structure.items() if count > 0 and not slot.startswith("BN_") and slot not in FLEX_ELIGIBILITY}
         if core_starter_positions_defined:
@@ -331,16 +385,20 @@ def genetic_algorithm_adp_lineup(curr_round, ga_context, processed_id_map, sessi
                 if any(p and not position_order[i].startswith("BN_") and p[2] == core_pos for i, p in enumerate(lineup_player_objects)) and bench_player_actual_positions[core_pos] == 0:
                     missing_backup_penalty_points += 1
             if missing_backup_penalty_points > 0: fitness_score -= (PENALTY_VIOLATION * BACKUP_POSITION_PENALTY_SCALER * missing_backup_penalty_points)
+        
         if total_roster_spots > 0:
             draft_round_threshold = total_roster_spots + 2
             undraftable_adp_penalty = sum(p[4] - draft_round_threshold for p in valid_player_data_for_checks if p[4] > draft_round_threshold)
             if undraftable_adp_penalty > 0: fitness_score -= (PENALTY_VIOLATION * UNDRAFTABLE_ADP_PENALTY_SCALER * undraftable_adp_penalty)
+        
         total_reach_penalty_points = sum(p[4] - current_draft_round - ALLOWED_REACH_ROUNDS for p in valid_player_data_for_checks if (p[4] - current_draft_round) > ALLOWED_REACH_ROUNDS)
         if total_reach_penalty_points > 0: fitness_score -= (PENALTY_VIOLATION * REACH_PENALTY_SCALER * total_reach_penalty_points)
+        
         player_adp_rounds_in_lineup = [p[4] for p in valid_player_data_for_checks]
         adp_round_counts = Counter(player_adp_rounds_in_lineup)
         num_future_round_stacking_violations = sum(count - 1 for adp_r, count in adp_round_counts.items() if count > 1 and adp_r >= current_draft_round)
         if num_future_round_stacking_violations > 0: fitness_score -= (PENALTY_VIOLATION * num_future_round_stacking_violations * 1.5)
+        
         return fitness_score, raw_ppg_sum, set(player_adp_rounds_in_lineup), valid_player_data_for_checks
 
     def repair_lineup(lineup_ids):
@@ -466,12 +524,10 @@ if not INITIAL_SETUP_SUCCESS:
 else:
     app.layout = dbc.Container([
         dcc.Store(id='session-store', storage_type='memory'),
-        # FIX: The new, dedicated store for notifications
         dcc.Store(id='notification-store', data={}),
         dcc.Interval(id='alert-interval', disabled=True, n_intervals=0, max_intervals=1, interval=4000),
         dbc.Row(dbc.Col(html.H1("🏈 Evolve Draft: Multi-User Fantasy Football Advisor", className="text-center my-4"))),
         dbc.Row(dbc.Col(id='current-round-info', className="text-center mb-3 fw-bold fs-5")),
-        # FIX: This single div will now be controlled by the dedicated notification callback
         dbc.Row(dbc.Col(id='action-messages-div')),
         dbc.Row([
             dbc.Col(md=4, children=[
@@ -493,17 +549,14 @@ else:
         if session_data is None: return get_initial_session_data()
         return dash.no_update
 
-    # FIX: This callback now outputs a notification dictionary to the notification-store
     @app.callback(
-        [Output('session-store', 'data', allow_duplicate=True),
-         Output('notification-store', 'data', allow_duplicate=True)],
+        [Output('session-store', 'data', allow_duplicate=True), Output('notification-store', 'data', allow_duplicate=True)],
         [Input('teams-slider', 'value'), Input('scoring-mode-selector', 'value'), Input('restart-draft-btn', 'n_clicks'), Input('apply-roster-changes-btn', 'n_clicks')],
         [State('session-store', 'data')] + [State(f"roster-input-{key.replace('/', '-')}", "value") for key in get_initial_session_data()['roster_structure'].keys()],
         prevent_initial_call=True)
     def handle_session_modifiers(new_team_count, selected_mode, restart_clicks, apply_roster_clicks, session_data, *roster_values):
         if session_data is None: return dash.no_update, dash.no_update
         triggered_id, new_session, notification = ctx.triggered_id, copy.deepcopy(session_data), {}
-
         if triggered_id == 'teams-slider' and new_team_count != new_session.get('picks_per_round'):
             new_session.update({'picks_per_round': new_team_count, 'globally_drafted_player_ids': [], 'user_drafted_player_ids': []})
             notification = {'message': f"League size set to {new_team_count}. Draft has been reset.", 'color': 'info'}
@@ -518,8 +571,7 @@ else:
             for i, key in enumerate(get_initial_session_data()['roster_structure'].keys()):
                 val = roster_values[i]
                 if val is None or not isinstance(val, int) or val < 0:
-                    notification = {'message': f"Invalid count for {key}. Must be a non-negative integer.", 'color': 'danger'}
-                    valid_update = False; break
+                    notification = {'message': f"Invalid count for {key}. Must be a non-negative integer.", 'color': 'danger'}; valid_update = False; break
                 new_roster[key] = val
             if valid_update:
                 if sum(new_roster.values()) == 0:
@@ -527,11 +579,9 @@ else:
                 else:
                     new_session.update({'roster_structure': new_roster, 'globally_drafted_player_ids': [], 'user_drafted_player_ids': []})
                     notification = {'message': "Roster structure updated. Draft has been reset.", 'color': 'success'}
-        
         if notification: return new_session, notification
         return new_session, dash.no_update
 
-    # FIX: This callback also outputs to the notification-store
     @app.callback(
         [Output('session-store', 'data', allow_duplicate=True), Output('notification-store', 'data', allow_duplicate=True),
          Output('player-query-input', 'value'), Output('undo-player-query-input', 'value')],
@@ -539,24 +589,17 @@ else:
         [State('player-query-input', 'value'), State('undo-player-query-input', 'value'), State('session-store', 'data')],
         prevent_initial_call=True)
     def handle_draft_actions(opp_clicks, my_clicks, undo_clicks, n_submit, query_val, undo_val, session_data):
-        if not ctx.triggered_id or session_data is None:
-            return dash.no_update, dash.no_update, query_val, undo_val
-
+        if not ctx.triggered_id or session_data is None: return dash.no_update, dash.no_update, query_val, undo_val
         triggered_id, new_session, notification = ctx.triggered_id, copy.deepcopy(session_data), {}
         query_out, undo_out, is_successful_action = query_val, undo_val, False
-
-        active_query, action_type = (query_val, 'opponent') if triggered_id in ['player-query-input', 'draft-opponent-btn'] else \
-                                    (query_val, 'my_team') if triggered_id == 'draft-my-team-btn' else \
-                                    (undo_val, 'undo') if triggered_id == 'undo-draft-btn' else (None, None)
+        active_query, action_type = (query_val, 'opponent') if triggered_id in ['player-query-input', 'draft-opponent-btn'] else (query_val, 'my_team') if triggered_id == 'draft-my-team-btn' else (undo_val, 'undo') if triggered_id == 'undo-draft-btn' else (None, None)
         if not active_query:
             notification = {'message': "Player name/ID cannot be empty.", 'color': 'warning'}
             return dash.no_update, notification, query_val, undo_val
-
         matched, p_data_dict = find_player_flexible(active_query, MASTER_PLAYER_POOL_RAW), None
         if not matched: notification = {'message': f"Player '{active_query}' not found.", 'color': 'danger'}
         elif len(matched) > 1: notification = {'message': f"Ambiguous name '{active_query}'. Use a more specific name or ID.", 'color': 'warning'}
         else: p_data_dict = matched[0]
-        
         if p_data_dict:
             pid, pname = p_data_dict['ID'], p_data_dict['Name']
             drafted_set, my_team_set = set(new_session['globally_drafted_player_ids']), set(new_session['user_drafted_player_ids'])
@@ -577,33 +620,23 @@ else:
                     if pid in my_team_set: new_session['user_drafted_player_ids'] = [p for p in new_session['user_drafted_player_ids'] if p != pid]
                     notification = {'message': f"Removed {pname} from the draft board.", 'color': 'info'}
                     is_successful_action = True
-        
         if is_successful_action:
             if action_type in ['opponent', 'my_team']: query_out = ''
             elif action_type == 'undo': undo_out = ''
-        
         return new_session, notification, query_out, undo_out
 
-    # FIX: New callback to manage displaying the alert from the notification-store
     @app.callback(
-        [Output('action-messages-div', 'children'),
-         Output('alert-interval', 'disabled')],
-        Input('notification-store', 'data'),
-        prevent_initial_call=True
-    )
+        [Output('action-messages-div', 'children'), Output('alert-interval', 'disabled')],
+        Input('notification-store', 'data'), prevent_initial_call=True)
     def display_notification(notification_data):
         if notification_data and notification_data.get('message'):
-            message = notification_data['message']
-            color = notification_data.get('color', 'primary')
-            return dbc.Alert(message, color=color), False
+            message, color = notification_data['message'], notification_data.get('color', 'primary')
+            return dbc.Alert(message, color=color, dismissable=True, duration=4000), False
         return None, True
 
-    # FIX: New callback to clear the alert after the interval completes
     @app.callback(
         Output('action-messages-div', 'children', allow_duplicate=True),
-        Input('alert-interval', 'n_intervals'),
-        prevent_initial_call=True
-    )
+        Input('alert-interval', 'n_intervals'), prevent_initial_call=True)
     def clear_alert(n_intervals):
         return None
 
