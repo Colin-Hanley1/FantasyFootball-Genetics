@@ -18,9 +18,8 @@ DEFAULT_CSV_FILENAME = "player_pool.csv"
 GA_LOG_FILENAME = "ga_training_log.csv"
 
 # --- Roster Configuration (Flex Eligibility is a global constant) ---
-# FIX: Renamed "W/R/T" to "Flex" for clarity
 FLEX_ELIGIBILITY = {
-    "FLEX": ("WR", "RB", "TE"), "W/R": ("WR", "RB"), "R/T": ("RB", "TE"),
+    "Flex": ("WR", "RB", "TE"), "W/R": ("WR", "RB"), "R/T": ("RB", "TE"),
     "SUPERFLEX": ("QB", "WR", "RB", "TE"), "BN_SUPERFLEX": ("QB", "WR", "RB", "TE"),
     "BN_FLX": ("WR", "RB", "TE")
 }
@@ -85,15 +84,11 @@ def load_master_player_pool_from_csv(filename=DEFAULT_CSV_FILENAME):
     return player_pool_list
 
 def get_initial_session_data():
-    """
-    Returns a dictionary with the default state for a new user session.
-    FIX: Renamed "W/R/T" to "Flex" in the default roster structure.
-    """
     return {
         'scoring_mode': "PPR",
         'picks_per_round': 8,
         'roster_structure': {
-            "QB": 1, "RB": 2, "WR": 2, "TE": 1, "FLEX": 1,
+            "QB": 1, "RB": 2, "WR": 2, "TE": 1, "Flex": 1,
             "SUPERFLEX": 0,
             "BN_SUPERFLEX": 1, "BN_FLX": 4
         },
@@ -102,35 +97,25 @@ def get_initial_session_data():
     }
 
 def is_superflex_mode(roster_structure):
-    """Checks if the current roster settings trigger Superflex mode."""
     return (
         roster_structure.get("SUPERFLEX", 0) > 0 or
         roster_structure.get("QB", 0) >= 2
     )
 
 def get_processed_player_pool_for_session(session_data):
-    """
-    Processes raw data based on session settings, now dynamically selecting ADP
-    based on whether Superflex mode is active.
-    """
     scoring_mode = session_data.get('scoring_mode', 'PPR')
     picks_per_round = session_data.get('picks_per_round', 8)
     roster_structure = session_data.get('roster_structure', {})
-
     superflex_active = is_superflex_mode(roster_structure)
-
     processed_pool_tuples = []
     for p_raw in MASTER_PLAYER_POOL_RAW:
         active_points = p_raw['PPRPoints'] if scoring_mode == "PPR" else p_raw['STDPoints']
-
         if superflex_active:
             active_adp = p_raw['PPRSFADP'] if scoring_mode == "PPR" else p_raw['STDSFADP']
         else:
             active_adp = p_raw['PPRADP'] if scoring_mode == "PPR" else p_raw['STDADP']
-
         ppg = active_points / GAMES_IN_SEASON if GAMES_IN_SEASON > 0 else 0
         calc_round = max(1, math.ceil(active_adp / picks_per_round)) if picks_per_round > 0 else 1
-
         processed_pool_tuples.append(
             (p_raw['ID'], p_raw['Name'], p_raw['Position'], ppg, calc_round, p_raw['ByeWeek'], p_raw['Team'])
         )
@@ -138,14 +123,10 @@ def get_processed_player_pool_for_session(session_data):
     return processed_pool_tuples, processed_id_map
 
 def get_roster_derived_details(roster_structure):
-    """
-    Calculates position order and total spots from a given roster structure.
-    FIX: Renamed "W/R/T" to "Flex" in the starter display order.
-    """
     position_order, total_spots = [], 0
     starters = {k: v for k, v in roster_structure.items() if not k.startswith("BN_")}
     bench = {k: v for k, v in roster_structure.items() if k.startswith("BN_")}
-    starter_display_order = ["QB", "RB", "WR", "TE", "FLEX", "W/R", "R/T", "SUPERFLEX"]
+    starter_display_order = ["QB", "RB", "WR", "TE", "Flex", "W/R", "R/T", "SUPERFLEX"]
     sorted_starters = sorted(
         starters.items(),
         key=lambda item: starter_display_order.index(item[0]) if item[0] in starter_display_order else float('inf')
@@ -212,7 +193,7 @@ def parse_csv_name_to_fi_ln(csv_formatted_name):
         first_initials, last_name = "", ""
         i = 0
         while i < len(name_part) and name_part[i].isupper(): i += 1
-        first_initials = name_part[:i]
+        first_initials, last_name = name_part[:i]
         last_name = name_part[i:]
         if len(first_initials) > 2 and not last_name: last_name, first_initials = first_initials, ""
         return first_initials.lower(), last_name.lower()
@@ -260,52 +241,90 @@ def find_player_flexible(query_str, master_pool_raw):
 
 # --- Main GA Logic ---
 def prepare_for_ga_run(session_data, processed_player_pool, processed_id_map):
+    """
+    Assigns drafted players to roster slots based on a logical order.
+    Now with constraints on bench positions.
+    """
     roster_structure = session_data['roster_structure']
     user_drafted_ids = set(session_data['user_drafted_player_ids'])
     position_order, total_roster_spots = get_roster_derived_details(roster_structure)
-    available_slots = list(range(total_roster_spots))
     user_player_data = [processed_id_map[pid] for pid in user_drafted_ids if pid in processed_id_map]
     user_slot_assignments = {}
+
     player_groups = {}
     for p_data in user_player_data:
         player_groups.setdefault(p_data[2], []).append(p_data)
     for pos in player_groups:
         player_groups[pos].sort(key=lambda x: x[3], reverse=True)
-    starter_slots = [(i, p_type) for i, p_type in enumerate(position_order) if not p_type.startswith("BN_")]
-    for slot_idx, slot_type in starter_slots:
+
+    temp_player_groups = copy.deepcopy(player_groups)
+    unassigned_starter_slots = [i for i, p_type in enumerate(position_order) if not p_type.startswith("BN_")]
+    
+    for slot_idx in unassigned_starter_slots:
+        slot_type = position_order[slot_idx]
         best_player_to_assign = None
-        if slot_type in player_groups and player_groups[slot_type]:
-            best_player_to_assign = player_groups[slot_type][0]
+        if slot_type in temp_player_groups and temp_player_groups[slot_type]:
+            best_player_to_assign = temp_player_groups[slot_type][0]
         elif slot_type in FLEX_ELIGIBILITY:
             candidate_players = []
             for pos in FLEX_ELIGIBILITY[slot_type]:
-                if pos in player_groups and player_groups[pos]:
-                    candidate_players.append(player_groups[pos][0])
+                if pos in temp_player_groups and temp_player_groups[pos]:
+                    candidate_players.append(temp_player_groups[pos][0])
             if candidate_players:
                 best_player_to_assign = max(candidate_players, key=lambda p: p[3])
         if best_player_to_assign:
             user_slot_assignments[best_player_to_assign[0]] = slot_idx
-            available_slots.remove(slot_idx)
-            player_groups[best_player_to_assign[2]].pop(0)
-    remaining_players = []
-    for pos_group in player_groups.values():
-        remaining_players.extend(pos_group)
+            temp_player_groups[best_player_to_assign[2]].pop(0)
+
+    # --- NEW BENCH ASSIGNMENT LOGIC ---
+    assigned_starter_pids = set(user_slot_assignments.keys())
+    remaining_players = [p for p in user_player_data if p[0] not in assigned_starter_pids]
     remaining_players.sort(key=lambda x: x[3], reverse=True)
-    remaining_qbs = [p for p in remaining_players if p[2] == 'QB']
-    other_remaining_players = [p for p in remaining_players if p[2] != 'QB']
-    all_bench_slots = [i for i in available_slots if position_order[i].startswith("BN_")]
-    bn_superflex_slots = [i for i in all_bench_slots if position_order[i] == "BN_SUPERFLEX"]
-    other_bench_slots = [i for i in all_bench_slots if position_order[i] != "BN_SUPERFLEX"]
-    for qb in remaining_qbs:
-        if bn_superflex_slots:
+
+    assigned_starter_slots = set(user_slot_assignments.values())
+    available_bench_slots = [i for i, p_type in enumerate(position_order) if p_type.startswith("BN_") and i not in assigned_starter_slots]
+
+    # Calculate bench limits
+    num_starter_qb = roster_structure.get("QB", 0) + roster_structure.get("SUPERFLEX", 0)
+    num_starter_rb = roster_structure.get("RB", 0)
+    num_starter_wr = roster_structure.get("WR", 0)
+    num_starter_te = roster_structure.get("TE", 0)
+    num_flex_spots = roster_structure.get("Flex", 0) + roster_structure.get("W/R", 0) + roster_structure.get("R/T", 0) + roster_structure.get("W/R/T", 0)
+
+    max_bench_qb = num_starter_qb
+    max_bench_te = num_starter_te
+    max_bench_rb = num_starter_rb + num_flex_spots
+    max_bench_wr = num_starter_wr + num_flex_spots
+    bench_counts = {'QB': 0, 'RB': 0, 'WR': 0, 'TE': 0}
+
+    # Prioritize QBs for BN_SUPERFLEX
+    bn_superflex_slots = [i for i in available_bench_slots if position_order[i] == 'BN_SUPERFLEX']
+    other_bench_slots = [i for i in available_bench_slots if position_order[i] != 'BN_SUPERFLEX']
+    
+    players_to_place_on_bench = list(remaining_players)
+    for player in list(players_to_place_on_bench):
+        pos = player[2]
+        if pos == 'QB' and bn_superflex_slots and bench_counts['QB'] < max_bench_qb:
             slot_idx = bn_superflex_slots.pop(0)
-            user_slot_assignments[qb[0]] = slot_idx
-    all_remaining_bench_slots = other_bench_slots + bn_superflex_slots
-    all_remaining_bench_slots.sort()
-    for player in other_remaining_players:
-        if all_remaining_bench_slots:
-            slot_idx = all_remaining_bench_slots.pop(0)
             user_slot_assignments[player[0]] = slot_idx
+            bench_counts['QB'] += 1
+            players_to_place_on_bench.remove(player)
+
+    # Fill remaining bench slots respecting limits
+    remaining_bench_slots = other_bench_slots + bn_superflex_slots
+    remaining_bench_slots.sort()
+
+    for player in players_to_place_on_bench:
+        if not remaining_bench_slots: break
+        pos = player[2]
+        limit_reached = (pos == 'RB' and bench_counts['RB'] >= max_bench_rb) or \
+                        (pos == 'WR' and bench_counts['WR'] >= max_bench_wr) or \
+                        (pos == 'TE' and bench_counts['TE'] >= max_bench_te)
+        if not limit_reached:
+            slot_idx = remaining_bench_slots.pop(0)
+            user_slot_assignments[player[0]] = slot_idx
+            bench_counts[pos] += 1
+    
     globally_drafted_ids = set(session_data['globally_drafted_player_ids'])
     available_pool = [p for p in processed_player_pool if p[0] not in globally_drafted_ids]
     players_by_pos = {pos: sorted([p for p in available_pool if p[2] == pos], key=lambda x: (x[4], -x[3])) for pos in set(p[2] for p in available_pool)}
