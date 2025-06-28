@@ -260,6 +260,9 @@ def find_player_flexible(query_str, master_pool_raw):
 
 # --- Main GA Logic ---
 def prepare_for_ga_run(session_data, processed_player_pool, processed_id_map):
+    """
+    Assigns drafted players to roster slots based on an expert-driven, phased approach.
+    """
     roster_structure = session_data['roster_structure']
     user_drafted_ids = set(session_data['user_drafted_player_ids'])
     position_order, total_roster_spots = get_roster_derived_details(roster_structure)
@@ -273,31 +276,47 @@ def prepare_for_ga_run(session_data, processed_player_pool, processed_id_map):
         player_groups[pos].sort(key=lambda x: x[7], reverse=True)
 
     temp_player_groups = copy.deepcopy(player_groups)
-    unassigned_starter_slots = [i for i, p_type in enumerate(position_order) if not p_type.startswith("BN_")]
+    starter_slots = [(i, p_type) for i, p_type in enumerate(position_order) if not p_type.startswith("BN_")]
     
-    for slot_idx in unassigned_starter_slots:
-        slot_type = position_order[slot_idx]
-        best_player_to_assign = None
-        eligible_positions_for_slot = FLEX_ELIGIBILITY.get(slot_type, [slot_type])
-        candidate_players = []
-        for pos in eligible_positions_for_slot:
-            if pos in temp_player_groups and temp_player_groups[pos]:
-                candidate_players.append(temp_player_groups[pos][0])
-        if candidate_players:
-            best_player_to_assign = max(candidate_players, key=lambda p: p[7])
-        if best_player_to_assign:
-            user_slot_assignments[best_player_to_assign[0]] = slot_idx
-            temp_player_groups[best_player_to_assign[2]].pop(0)
+    # --- PHASE 1: Fill DEDICATED Starter Slots (QB, RB, WR, TE) ---
+    dedicated_starter_slots = [s for s in starter_slots if s[1] not in FLEX_ELIGIBILITY]
+    for slot_idx, slot_type in dedicated_starter_slots:
+        if slot_type in temp_player_groups and temp_player_groups[slot_type]:
+            player_to_assign = temp_player_groups[slot_type].pop(0)
+            user_slot_assignments[player_to_assign[0]] = slot_idx
 
-    remaining_players = []
+    # --- PHASE 2: Fill FLEX Starter Slots ---
+    flex_starter_slots = [s for s in starter_slots if s[1] in FLEX_ELIGIBILITY]
+    # Create a pool of the best remaining players for any flex-eligible position
+    flex_candidate_pool = []
     for pos_group in temp_player_groups.values():
-        remaining_players.extend(pos_group)
-    remaining_players.sort(key=lambda x: x[7], reverse=True)
+        flex_candidate_pool.extend(pos_group)
+    flex_candidate_pool.sort(key=lambda p: p[7], reverse=True) # Sort by VORP
 
-    assigned_starter_slots = set(user_slot_assignments.values())
-    available_bench_slots = [i for i, p_type in enumerate(position_order) if p_type.startswith("BN_") and i not in assigned_starter_slots]
+    for slot_idx, slot_type in flex_starter_slots:
+        best_player_for_slot = None
+        player_to_remove_from_pool = None
+        for candidate in flex_candidate_pool:
+            if candidate[2] in FLEX_ELIGIBILITY.get(slot_type, []):
+                best_player_for_slot = candidate
+                player_to_remove_from_pool = candidate
+                break 
+        if best_player_for_slot:
+            user_slot_assignments[best_player_for_slot[0]] = slot_idx
+            flex_candidate_pool.remove(player_to_remove_from_pool)
+            # Also remove from the original group to avoid re-assignment
+            original_pos = best_player_for_slot[2]
+            if original_pos in temp_player_groups:
+                temp_player_groups[original_pos] = [p for p in temp_player_groups[original_pos] if p[0] != best_player_for_slot[0]]
+
+
+    # --- PHASE 3: Assign Bench Players ---
+    remaining_players_for_bench = flex_candidate_pool
     
-    bench_counts = {'QB': 0, 'RB': 0, 'WR': 0, 'TE': 0}
+    assigned_slots = set(user_slot_assignments.values())
+    available_bench_slots = [i for i, p_type in enumerate(position_order) if p_type.startswith("BN_") and i not in assigned_slots]
+    
+    # Calculate bench limits
     num_starter_qb = roster_structure.get("QB", 0) + roster_structure.get("SUPERFLEX", 0)
     num_starter_rb = roster_structure.get("RB", 0)
     num_starter_wr = roster_structure.get("WR", 0)
@@ -308,23 +327,25 @@ def prepare_for_ga_run(session_data, processed_player_pool, processed_id_map):
     max_bench_te = num_starter_te
     max_bench_rb = num_starter_rb + num_flex_spots
     max_bench_wr = num_starter_wr + num_flex_spots
+    bench_counts = {'QB': 0, 'RB': 0, 'WR': 0, 'TE': 0}
 
+    # Prioritize QBs for BN_SUPERFLEX
     bn_superflex_slots = [i for i in available_bench_slots if position_order[i] == 'BN_SUPERFLEX']
     other_bench_slots = [i for i in available_bench_slots if position_order[i] != 'BN_SUPERFLEX']
     
-    players_to_place_on_bench = list(remaining_players)
-    for player in list(players_to_place_on_bench):
+    for player in list(remaining_players_for_bench):
         pos = player[2]
         if pos == 'QB' and bn_superflex_slots and bench_counts['QB'] < max_bench_qb:
             slot_idx = bn_superflex_slots.pop(0)
             user_slot_assignments[player[0]] = slot_idx
             bench_counts['QB'] += 1
-            players_to_place_on_bench.remove(player)
+            remaining_players_for_bench.remove(player)
 
+    # Fill remaining bench slots respecting limits
     remaining_bench_slots = other_bench_slots + bn_superflex_slots
     remaining_bench_slots.sort()
 
-    for player in players_to_place_on_bench:
+    for player in remaining_players_for_bench:
         if not remaining_bench_slots: break
         pos = player[2]
         limit_reached = (pos == 'RB' and bench_counts['RB'] >= max_bench_rb) or \
@@ -560,7 +581,7 @@ else:
         dcc.Store(id='session-store', storage_type='memory'),
         dcc.Store(id='notification-store', data={}),
         dcc.Interval(id='alert-interval', disabled=True, n_intervals=0, max_intervals=1, interval=4000),
-        dbc.Row(dbc.Col(html.H1("🏈 Evolve Draft: Fantasy Football Advisor", className="text-center my-4"))),
+        dbc.Row(dbc.Col(html.H1("🏈 Evolve Draft: Genetic Fantasy Football Advisor", className="text-center my-4"))),
         dbc.Row(dbc.Col(id='current-round-info', className="text-center mb-3 fw-bold fs-5")),
         dbc.Row(dbc.Col(id='action-messages-div')),
         dbc.Row([
