@@ -11,6 +11,7 @@ import os
 from collections import Counter
 import numpy as np
 import copy
+import pandas as pd
 
 # --- Configuration Constants ---
 GAMES_IN_SEASON = 17
@@ -108,16 +109,29 @@ def get_processed_player_pool_for_session(session_data):
     roster_structure = session_data.get('roster_structure', {})
     superflex_active = is_superflex_mode(roster_structure)
     processed_pool_tuples = []
-    for p_raw in MASTER_PLAYER_POOL_RAW:
-        active_points = p_raw['PPRPoints'] if scoring_mode == "PPR" else p_raw['STDPoints']
+
+    temp_df = pd.DataFrame(MASTER_PLAYER_POOL_RAW)
+    temp_df['points'] = temp_df['PPRPoints'] if scoring_mode == 'PPR' else temp_df['STDPoints']
+    
+    replacement_levels = {
+        'QB': temp_df[temp_df['Position'] == 'QB']['points'].nlargest(12).iloc[-1] if len(temp_df[temp_df['Position'] == 'QB']) > 12 else 0,
+        'RB': temp_df[temp_df['Position'] == 'RB']['points'].nlargest(24).iloc[-1] if len(temp_df[temp_df['Position'] == 'RB']) > 24 else 0,
+        'WR': temp_df[temp_df['Position'] == 'WR']['points'].nlargest(36).iloc[-1] if len(temp_df[temp_df['Position'] == 'WR']) > 36 else 0,
+        'TE': temp_df[temp_df['Position'] == 'TE']['points'].nlargest(12).iloc[-1] if len(temp_df[temp_df['Position'] == 'TE']) > 12 else 0,
+    }
+    
+    temp_df['vorp'] = temp_df.apply(lambda row: row['points'] - replacement_levels.get(row['Position'], 0), axis=1)
+
+    for _, row in temp_df.iterrows():
+        active_points = row['points']
         if superflex_active:
-            active_adp = p_raw['PPRSFADP'] if scoring_mode == "PPR" else p_raw['STDSFADP']
+            active_adp = row['PPRSFADP'] if scoring_mode == "PPR" else row['STDSFADP']
         else:
-            active_adp = p_raw['PPRADP'] if scoring_mode == "PPR" else p_raw['STDADP']
+            active_adp = row['PPRADP'] if scoring_mode == "PPR" else row['STDADP']
         ppg = active_points / GAMES_IN_SEASON if GAMES_IN_SEASON > 0 else 0
         calc_round = max(1, math.ceil(active_adp / picks_per_round)) if picks_per_round > 0 else 1
         processed_pool_tuples.append(
-            (p_raw['ID'], p_raw['Name'], p_raw['Position'], ppg, calc_round, p_raw['ByeWeek'], p_raw['Team'])
+            (row['ID'], row['Name'], row['Position'], ppg, calc_round, row['ByeWeek'], row['Team'], row['vorp'])
         )
     processed_id_map = {p[0]: p for p in processed_pool_tuples}
     return processed_pool_tuples, processed_id_map
@@ -160,7 +174,7 @@ def format_ga_results_display(best_lineup_ids, best_fitness, ga_messages, next_p
         children.append(dbc.Alert([
             html.H5("🎯 Next Pick Suggestion:", className="alert-heading"),
             html.P(f"Consider: {p[1]} ({p[2]})", className="mb-1"),
-            html.P(f"PPG: {p[3]:.2f} | ADP Rd: {p[4]} | Bye: {p[5] if p[5] > 0 else '-'}", style={'fontSize': '0.9rem'})
+            html.P(f"PPG: {p[3]:.2f} | VORP: {p[7]:.2f} | ADP Rd: {p[4]} | Bye: {p[5] if p[5] > 0 else '-'}", style={'fontSize': '0.9rem'})
         ], color="primary", className="mt-1 mb-3 shadow-sm"))
     children.extend(ga_messages)
     if best_lineup_ids and best_fitness > -PENALTY_VIOLATION * 50:
@@ -170,7 +184,7 @@ def format_ga_results_display(best_lineup_ids, best_fitness, ga_messages, next_p
                 slot_type = position_order[i]
                 user_pick_str = " (Your Pick)" if pid in user_drafted_pids else ""
                 if p_data:
-                    txt = f"S{i:02d}({slot_type:<10}): {p_data[1]:<20}({p_data[2]:<2}) PPG:{p_data[3]:>5.2f} Bye:{p_data[5] if p_data[5] > 0 else '-'} Rd:{p_data[4]:>2}{user_pick_str}"
+                    txt = f"S{i:02d}({slot_type:<10}): {p_data[1]:<20}({p_data[2]:<2}) PPG:{p_data[3]:>5.2f} VORP:{p_data[7]:>5.2f} Rd:{p_data[4]:>2}{user_pick_str}"
                 else:
                     txt = f"S{i:02d}({slot_type:<10}): EMPTY"
                 items.append(dbc.ListGroupItem(txt, style={'fontSize': '0.8rem', 'padding': '0.25rem 0.5rem'}))
@@ -241,10 +255,6 @@ def find_player_flexible(query_str, master_pool_raw):
 
 # --- Main GA Logic ---
 def prepare_for_ga_run(session_data, processed_player_pool, processed_id_map):
-    """
-    Assigns drafted players to roster slots based on a logical order.
-    Now with constraints on bench positions.
-    """
     roster_structure = session_data['roster_structure']
     user_drafted_ids = set(session_data['user_drafted_player_ids'])
     position_order, total_roster_spots = get_roster_derived_details(roster_structure)
@@ -255,7 +265,7 @@ def prepare_for_ga_run(session_data, processed_player_pool, processed_id_map):
     for p_data in user_player_data:
         player_groups.setdefault(p_data[2], []).append(p_data)
     for pos in player_groups:
-        player_groups[pos].sort(key=lambda x: x[3], reverse=True)
+        player_groups[pos].sort(key=lambda x: x[7], reverse=True)
 
     temp_player_groups = copy.deepcopy(player_groups)
     unassigned_starter_slots = [i for i, p_type in enumerate(position_order) if not p_type.startswith("BN_")]
@@ -263,41 +273,37 @@ def prepare_for_ga_run(session_data, processed_player_pool, processed_id_map):
     for slot_idx in unassigned_starter_slots:
         slot_type = position_order[slot_idx]
         best_player_to_assign = None
-        if slot_type in temp_player_groups and temp_player_groups[slot_type]:
-            best_player_to_assign = temp_player_groups[slot_type][0]
-        elif slot_type in FLEX_ELIGIBILITY:
-            candidate_players = []
-            for pos in FLEX_ELIGIBILITY[slot_type]:
-                if pos in temp_player_groups and temp_player_groups[pos]:
-                    candidate_players.append(temp_player_groups[pos][0])
-            if candidate_players:
-                best_player_to_assign = max(candidate_players, key=lambda p: p[3])
+        eligible_positions_for_slot = FLEX_ELIGIBILITY.get(slot_type, [slot_type])
+        candidate_players = []
+        for pos in eligible_positions_for_slot:
+            if pos in temp_player_groups and temp_player_groups[pos]:
+                candidate_players.append(temp_player_groups[pos][0])
+        if candidate_players:
+            best_player_to_assign = max(candidate_players, key=lambda p: p[7])
         if best_player_to_assign:
             user_slot_assignments[best_player_to_assign[0]] = slot_idx
             temp_player_groups[best_player_to_assign[2]].pop(0)
 
-    # --- NEW BENCH ASSIGNMENT LOGIC ---
-    assigned_starter_pids = set(user_slot_assignments.keys())
-    remaining_players = [p for p in user_player_data if p[0] not in assigned_starter_pids]
-    remaining_players.sort(key=lambda x: x[3], reverse=True)
+    remaining_players = []
+    for pos_group in temp_player_groups.values():
+        remaining_players.extend(pos_group)
+    remaining_players.sort(key=lambda x: x[7], reverse=True)
 
     assigned_starter_slots = set(user_slot_assignments.values())
     available_bench_slots = [i for i, p_type in enumerate(position_order) if p_type.startswith("BN_") and i not in assigned_starter_slots]
-
-    # Calculate bench limits
+    
+    bench_counts = {'QB': 0, 'RB': 0, 'WR': 0, 'TE': 0}
     num_starter_qb = roster_structure.get("QB", 0) + roster_structure.get("SUPERFLEX", 0)
     num_starter_rb = roster_structure.get("RB", 0)
     num_starter_wr = roster_structure.get("WR", 0)
     num_starter_te = roster_structure.get("TE", 0)
-    num_flex_spots = roster_structure.get("Flex", 0) + roster_structure.get("W/R", 0) + roster_structure.get("R/T", 0) + roster_structure.get("W/R/T", 0)
+    num_flex_spots = sum(roster_structure.get(s, 0) for s in ["Flex", "W/R", "R/T"])
 
     max_bench_qb = num_starter_qb
     max_bench_te = num_starter_te
     max_bench_rb = num_starter_rb + num_flex_spots
     max_bench_wr = num_starter_wr + num_flex_spots
-    bench_counts = {'QB': 0, 'RB': 0, 'WR': 0, 'TE': 0}
 
-    # Prioritize QBs for BN_SUPERFLEX
     bn_superflex_slots = [i for i in available_bench_slots if position_order[i] == 'BN_SUPERFLEX']
     other_bench_slots = [i for i in available_bench_slots if position_order[i] != 'BN_SUPERFLEX']
     
@@ -310,7 +316,6 @@ def prepare_for_ga_run(session_data, processed_player_pool, processed_id_map):
             bench_counts['QB'] += 1
             players_to_place_on_bench.remove(player)
 
-    # Fill remaining bench slots respecting limits
     remaining_bench_slots = other_bench_slots + bn_superflex_slots
     remaining_bench_slots.sort()
 
@@ -320,10 +325,18 @@ def prepare_for_ga_run(session_data, processed_player_pool, processed_id_map):
         limit_reached = (pos == 'RB' and bench_counts['RB'] >= max_bench_rb) or \
                         (pos == 'WR' and bench_counts['WR'] >= max_bench_wr) or \
                         (pos == 'TE' and bench_counts['TE'] >= max_bench_te)
-        if not limit_reached:
-            slot_idx = remaining_bench_slots.pop(0)
-            user_slot_assignments[player[0]] = slot_idx
+        
+        target_slot_idx = -1
+        for slot_idx in remaining_bench_slots:
+            slot_type = position_order[slot_idx]
+            if pos in FLEX_ELIGIBILITY.get(slot_type, []):
+                target_slot_idx = slot_idx
+                break
+        
+        if not limit_reached and target_slot_idx != -1:
+            user_slot_assignments[player[0]] = target_slot_idx
             bench_counts[pos] += 1
+            remaining_bench_slots.remove(target_slot_idx)
     
     globally_drafted_ids = set(session_data['globally_drafted_player_ids'])
     available_pool = [p for p in processed_player_pool if p[0] not in globally_drafted_ids]
