@@ -75,6 +75,20 @@ def load_master_player_pool_from_csv(filename=DEFAULT_CSV_FILENAME):
                         "ByeWeek": int(row["ByeWeek"]) if row["ByeWeek"] and row["ByeWeek"].strip() else 0,
                         "Team": row.get("Team", "N/A")
                     }
+                    
+                    csv_name = row["Name"]
+                    name_part = csv_name.split('_', 1)[-1] if '_' in csv_name else csv_name
+                    
+                    i = 0
+                    while i < len(name_part) and name_part[i].isupper() and not name_part[i+1:].islower():
+                        i += 1
+                    
+                    first_initials = name_part[:i].lower()
+                    last_name = name_part[i:].lower()
+
+                    player_data['search_fi_lastname'] = f"{first_initials}{last_name}"
+                    player_data['search_lastname'] = last_name
+                    
                     player_pool_list.append(player_data)
                 except (KeyError, ValueError) as e:
                     print(f"Warning: Skipping row {row_num} in '{filename}': {e}. Row: {row}")
@@ -110,15 +124,20 @@ def get_processed_player_pool_for_session(session_data):
     superflex_active = is_superflex_mode(roster_structure)
     processed_pool_tuples = []
 
+    if not MASTER_PLAYER_POOL_RAW:
+        return [], {}
+
     temp_df = pd.DataFrame(MASTER_PLAYER_POOL_RAW)
     temp_df['points'] = temp_df['PPRPoints'] if scoring_mode == 'PPR' else temp_df['STDPoints']
     
-    replacement_levels = {
-        'QB': temp_df[temp_df['Position'] == 'QB']['points'].nlargest(12).iloc[-1] if len(temp_df[temp_df['Position'] == 'QB']) > 12 else 0,
-        'RB': temp_df[temp_df['Position'] == 'RB']['points'].nlargest(24).iloc[-1] if len(temp_df[temp_df['Position'] == 'RB']) > 24 else 0,
-        'WR': temp_df[temp_df['Position'] == 'WR']['points'].nlargest(36).iloc[-1] if len(temp_df[temp_df['Position'] == 'WR']) > 36 else 0,
-        'TE': temp_df[temp_df['Position'] == 'TE']['points'].nlargest(12).iloc[-1] if len(temp_df[temp_df['Position'] == 'TE']) > 12 else 0,
-    }
+    replacement_levels = {}
+    positions_for_vorp = {'QB': 12, 'RB': 24, 'WR': 36, 'TE': 12}
+    for pos, threshold in positions_for_vorp.items():
+        pos_df = temp_df[temp_df['Position'] == pos]
+        if len(pos_df) >= threshold:
+            replacement_levels[pos] = pos_df['points'].nlargest(threshold).iloc[-1]
+        else:
+            replacement_levels[pos] = pos_df['points'].min() if not pos_df.empty else 0
     
     temp_df['vorp'] = temp_df.apply(lambda row: row['points'] - replacement_levels.get(row['Position'], 0), axis=1)
 
@@ -174,7 +193,8 @@ def format_ga_results_display(best_lineup_ids, best_fitness, ga_messages, next_p
         children.append(dbc.Alert([
             html.H5("🎯 Next Pick Suggestion:", className="alert-heading"),
             html.P(f"Consider: {p[1]} ({p[2]})", className="mb-1"),
-            html.P(f"PPG: {p[3]:.2f} | VORP: {p[7]:.2f} | ADP Rd: {p[4]} | Bye: {p[5] if p[5] > 0 else '-'}", style={'fontSize': '0.9rem'})
+            html.P(f"PPG: {p[3]:.2f} | VORP: {p[7]:.2f} | ADP Rd: {p[4]} | Bye: {p[5] if p[5] > 0 else '-'}", style={'fontSize': '0.9rem'}),
+            dbc.Button("Draft This Player", id="draft-suggestion-btn", value=p[0], color="success", size="sm", className="mt-2")
         ], color="primary", className="mt-1 mb-3 shadow-sm"))
     children.extend(ga_messages)
     if best_lineup_ids and best_fitness > -PENALTY_VIOLATION * 50:
@@ -192,65 +212,50 @@ def format_ga_results_display(best_lineup_ids, best_fitness, ga_messages, next_p
             children.append(dbc.ListGroup(items, flush=True, className="mt-2"))
     return children
 
-def normalize_name_for_search(name_str):
-    if not name_str: return ""
-    cleaned_name = name_str.lower().replace('.', '').replace("'", "").strip()
-    words = cleaned_name.split()
-    if not words: return ""
-    if len(words) == 1: return words[0]
-    return words[0][0] + "".join(words[1:])
-
-def parse_csv_name_to_fi_ln(csv_formatted_name):
-    try:
-        name_part = csv_formatted_name.split('_', 1)[-1]
-        if not name_part: return "", ""
-        first_initials, last_name = "", ""
-        i = 0
-        while i < len(name_part) and name_part[i].isupper(): i += 1
-        first_initials, last_name = name_part[:i]
-        last_name = name_part[i:]
-        if len(first_initials) > 2 and not last_name: last_name, first_initials = first_initials, ""
-        return first_initials.lower(), last_name.lower()
-    except Exception: return "", ""
-
 def find_player_flexible(query_str, master_pool_raw):
-    user_query_normalized_filn = normalize_name_for_search(query_str)
-    user_query_simple_lower = query_str.lower().replace('.', '').replace("'", "").strip()
-    POSSIBLE_QUERY_POSITIONS = {"qb", "wr", "rb", "te", "k", "def", "dst"}
-    query_pos_part, name_only_query_words_for_ln_match = None, []
-    for word in user_query_simple_lower.split():
-        if word in POSSIBLE_QUERY_POSITIONS: query_pos_part = word.upper()
-        else: name_only_query_words_for_ln_match.append(word)
-    potential_query_lastname_norm = normalize_name_for_search(" ".join(name_only_query_words_for_ln_match[-1:])) if name_only_query_words_for_ln_match else ""
-    exact_csv_matches, filn_format_matches, lastname_matches, strong_partial_matches, partial_matches = [], [], [], [], []
-    for p_data_dict in master_pool_raw:
-        pid, csv_name, csv_pos_col = p_data_dict["ID"], p_data_dict["Name"], p_data_dict["Position"]
-        csv_name_lower = csv_name.lower()
-        if user_query_simple_lower == csv_name_lower: exact_csv_matches.append(p_data_dict); continue
-        fi_csv, ln_csv = parse_csv_name_to_fi_ln(csv_name)
-        csv_name_normalized_filn = fi_csv + ln_csv
-        if user_query_normalized_filn == csv_name_normalized_filn:
-            if query_pos_part and query_pos_part == csv_pos_col: filn_format_matches.insert(0, p_data_dict)
-            elif not query_pos_part: filn_format_matches.append(p_data_dict)
-            else: partial_matches.append(p_data_dict)
+    try:
+        pid_query = int(query_str)
+        for p in master_pool_raw:
+            if p['ID'] == pid_query:
+                return [p]
+        return []
+    except (ValueError, TypeError):
+        pass
+
+    if not isinstance(query_str, str) or not query_str:
+        return []
+
+    query_lower = query_str.lower().strip()
+    query_no_space = query_lower.replace(" ", "")
+    words = query_lower.split()
+    query_lastname_guess = words[-1] if words else ""
+
+    exact_name_match, fi_lastname_match, lastname_match, partial_match = [], [], [], []
+
+    for p_data in master_pool_raw:
+        p_name_lower = p_data['Name'].lower()
+        p_fi_lastname = p_data['search_fi_lastname']
+        p_lastname = p_data['search_lastname']
+
+        if query_lower == p_name_lower:
+            exact_name_match.append(p_data)
             continue
-        if ln_csv and user_query_normalized_filn == ln_csv:
-             if query_pos_part and query_pos_part == csv_pos_col: lastname_matches.insert(0,p_data_dict)
-             elif not query_pos_part: lastname_matches.append(p_data_dict)
-             else: partial_matches.append(p_data_dict)
-             continue
-        if ln_csv and potential_query_lastname_norm and len(potential_query_lastname_norm) >= 3 and ln_csv.startswith(potential_query_lastname_norm):
-            if query_pos_part and query_pos_part == csv_pos_col: strong_partial_matches.append(p_data_dict)
-            elif not query_pos_part: partial_matches.append(p_data_dict)
+        if query_no_space == p_fi_lastname:
+            fi_lastname_match.append(p_data)
             continue
-        csv_name_part_after_underscore = csv_name_lower.split('_',1)[-1]
-        if len(user_query_simple_lower) >= 3 and user_query_simple_lower in csv_name_part_after_underscore:
-            partial_matches.append(p_data_dict); continue
+        if query_lastname_guess == p_lastname:
+            lastname_match.append(p_data)
+            continue
+        if query_no_space in p_fi_lastname:
+            partial_match.append(p_data)
+            continue
+
     final_results, seen_ids = [], set()
-    for p_list in [exact_csv_matches, filn_format_matches, lastname_matches, strong_partial_matches, partial_matches]:
-        for p_item_dict in p_list:
-            if p_item_dict['ID'] not in seen_ids:
-                final_results.append(p_item_dict); seen_ids.add(p_item_dict['ID'])
+    for p_list in [exact_name_match, fi_lastname_match, lastname_match, partial_match]:
+        for p_item in p_list:
+            if p_item['ID'] not in seen_ids:
+                final_results.append(p_item)
+                seen_ids.add(p_item['ID'])
     return final_results
 
 # --- Main GA Logic ---
@@ -555,7 +560,7 @@ else:
         dcc.Store(id='session-store', storage_type='memory'),
         dcc.Store(id='notification-store', data={}),
         dcc.Interval(id='alert-interval', disabled=True, n_intervals=0, max_intervals=1, interval=4000),
-        dbc.Row(dbc.Col(html.H1("🏈 Evolve Draft: Genetic Fantasy Football Advisor", className="text-center my-4"))),
+        dbc.Row(dbc.Col(html.H1("🏈 Evolve Draft: Fantasy Football Advisor", className="text-center my-4"))),
         dbc.Row(dbc.Col(id='current-round-info', className="text-center mb-3 fw-bold fs-5")),
         dbc.Row(dbc.Col(id='action-messages-div')),
         dbc.Row([
@@ -655,12 +660,38 @@ else:
         return new_session, notification, query_out, undo_out
 
     @app.callback(
+        [Output('session-store', 'data', allow_duplicate=True), Output('notification-store', 'data', allow_duplicate=True)],
+        Input('draft-suggestion-btn', 'n_clicks'),
+        [State('draft-suggestion-btn', 'value'), State('session-store', 'data')],
+        prevent_initial_call=True
+    )
+    def handle_suggestion_draft(n_clicks, player_id, session_data):
+        if not n_clicks or not player_id or not session_data: return dash.no_update, dash.no_update
+        new_session = copy.deepcopy(session_data)
+        drafted_set = set(new_session['globally_drafted_player_ids'])
+        notification = {}
+
+        player_name = "Player"
+        for p in MASTER_PLAYER_POOL_RAW:
+            if p['ID'] == player_id:
+                player_name = p['Name']
+                break
+            
+        if player_id in drafted_set:
+            notification = {'message': f"{player_name} was already drafted.", 'color': 'warning'}
+        else:
+            new_session['globally_drafted_player_ids'].append(player_id)
+            new_session['user_drafted_player_ids'].append(player_id)
+            notification = {'message': f"You drafted {player_name}!", 'color': 'success'}
+        return new_session, notification
+
+    @app.callback(
         [Output('action-messages-div', 'children'), Output('alert-interval', 'disabled')],
         Input('notification-store', 'data'), prevent_initial_call=True)
     def display_notification(notification_data):
         if notification_data and notification_data.get('message'):
             message, color = notification_data['message'], notification_data.get('color', 'primary')
-            return dbc.Alert(message, color=color, dismissable=True, duration=4000), False
+            return dbc.Alert(message, color=color, dismissable=True), False
         return None, True
 
     @app.callback(
