@@ -555,7 +555,7 @@ else:
         dcc.Store(id='session-store', storage_type='memory'),
         dcc.Store(id='notification-store', data={}),
         dcc.Interval(id='alert-interval', disabled=True, n_intervals=0, max_intervals=1, interval=4000),
-        dbc.Row(dbc.Col(html.H1("🏈 Evolve Draft: Multi-User Fantasy Football Advisor", className="text-center my-4"))),
+        dbc.Row(dbc.Col(html.H1("🏈 Evolve Draft: Genetic Fantasy Football Advisor", className="text-center my-4"))),
         dbc.Row(dbc.Col(id='current-round-info', className="text-center mb-3 fw-bold fs-5")),
         dbc.Row(dbc.Col(id='action-messages-div')),
         dbc.Row([
@@ -566,7 +566,7 @@ else:
             ]),
             dbc.Col(md=5, children=[
                 dbc.Card(id='my-team-card'),
-                dbc.Card([dbc.CardHeader(html.H4("Algorithm Suggestions", className="mb-0")), dbc.CardBody([dbc.Button('Run GA Suggestions 🚀', id='run-ga-btn', color='primary', className="mb-3 w-100"), dcc.Loading(id="loading-ga-spinner", type="default", children=[html.Div(id='ga-results-display')])])], className="mt-3")
+                dbc.Card([dbc.CardHeader(html.H4("Algorithm Suggestions", className="mb-0")), dbc.CardBody([dbc.Button('Optimize Lineup', id='run-ga-btn', color='primary', className="mb-3 w-100"), dcc.Loading(id="loading-ga-spinner", type="default", children=[html.Div(id='ga-results-display')])])], className="mt-3")
             ]),
             dbc.Col(md=3, children=[dbc.Card([dbc.CardHeader(html.H4("Globally Drafted Players", className="mb-0")), dcc.Loading(dbc.CardBody(html.Div(id='drafted-players-display', style={'maxHeight': 'calc(100vh - 160px)', 'overflowY': 'auto'})))])])
         ], className="mb-5")
