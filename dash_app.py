@@ -448,8 +448,6 @@ def genetic_algorithm_adp_lineup(curr_round, ga_context, processed_id_map, sessi
             draft_round_threshold = total_roster_spots + 2
             undraftable_adp_penalty = sum(p[4] - draft_round_threshold for p in valid_player_data_for_checks if p[4] > draft_round_threshold)
             if undraftable_adp_penalty > 0: fitness_score -= (PENALTY_VIOLATION * UNDRAFTABLE_ADP_PENALTY_SCALER * undraftable_adp_penalty)
-        total_reach_penalty_points = sum(p[4] - current_draft_round - ALLOWED_REACH_ROUNDS for p in valid_player_data_for_checks if (p[4] - current_draft_round) > ALLOWED_REACH_ROUNDS)
-        if total_reach_penalty_points > 0: fitness_score -= (PENALTY_VIOLATION * REACH_PENALTY_SCALER * total_reach_penalty_points)
         player_adp_rounds_in_lineup = [p[4] for p in valid_player_data_for_checks]
         adp_round_counts = Counter(player_adp_rounds_in_lineup)
         num_future_round_stacking_violations = sum(count - 1 for adp_r, count in adp_round_counts.items() if count > 1 and adp_r >= current_draft_round)
